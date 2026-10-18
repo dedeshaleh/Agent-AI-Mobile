@@ -1,0 +1,7 @@
+.tools/
+build/
+game/.godot/
+game/export_credentials.cfg
+*.keystore
+*.gguf
+*.log
