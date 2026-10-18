@@ -2,6 +2,8 @@
 
 Game kantor AI 2D isometric untuk Android landscape, mengikuti PRD di repositori ini. Target perangkat: Infinix GT 20 Pro / X6871. **Versi saat ini: Fase 1, demo playable tanpa LLM.**
 
+![Screenshot viewport game yang berjalan di laptop](docs/preview.png)
+
 ## Yang tersedia
 
 - Empat ruangan dengan meja, monitor, koridor dan kursi meeting.
@@ -35,6 +37,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Test.ps1
 ```
 
 Jika kebijakan PowerShell laptop melarang file `.ps1`, jalankan lewat editor Godot. Tidak perlu mengubah kebijakan keamanan Windows.
+
+Untuk workspace ini, bisa juga klik dua kali `scripts/Play.cmd` untuk membuka game di laptop.
 
 Kontrol: tap/klik robot untuk detail, tap ruangan untuk daftar agent, geser untuk pan, scroll/pinch untuk zoom, Spasi untuk jeda, M untuk meeting. x2 mempercepat simulasi demo; bukan pengaturan kecepatan LLM.
 

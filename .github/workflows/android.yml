@@ -51,7 +51,7 @@ jobs:
           EOF
       - uses: actions/cache@v6.1.0
         with:
-          path: ~/.android/debug.keystore
+          path: ~/.local/share/godot/keystores/debug.keystore
           key: agenthq-debug-key-${{ github.repository_id }}-v1
       - name: Import and test
         timeout-minutes: 5
