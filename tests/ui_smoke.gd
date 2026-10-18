@@ -17,8 +17,18 @@ func run() -> void:
 	check(game.csv_picker.use_native_dialog, "CSV picker uses native Android document picker")
 	var analytics: Control = load("res://scripts/analytics_panel.gd").new()
 	game.ui_layer.add_child(analytics)
-	analytics.setup({"rows": 1, "skipped": 0, "total": 12000.0, "average": 12000.0, "products": [{"name": "Kopi", "value": 12000.0}], "months": {"2026-01": 12000.0}, "preview": [{"month": "2026-01", "product": "Kopi", "value": 12000.0}]}, func(): pass)
+	analytics.setup({"rows": 1, "skipped": 0, "total": 12000.0, "average": 12000.0, "products": [{"name": "Kopi", "value": 12000.0}], "months": {"2026-01": 12000.0}, "preview": [{"month": "2026-01", "product": "Kopi", "value": 12000.0}]}, func(): pass, func(_question: String): pass)
 	check(analytics.get_child_count() >= 6, "Analytics dashboard renders KPI, product ranking and preview")
+	var question_field: LineEdit = analytics.find_child("QuestionInput", true, false)
+	var field_tap := InputEventScreenTouch.new()
+	field_tap.index = 10
+	field_tap.position = question_field.get_global_rect().get_center()
+	field_tap.pressed = true
+	game._input(field_tap)
+	field_tap.pressed = false
+	game._input(field_tap)
+	await process_frame
+	check(question_field.has_focus(), "Touch focuses the analytics question field")
 	analytics.queue_free()
 	game._start_mission()
 	check(game.mission_time == 0, "Demo mission starts")

@@ -4,6 +4,7 @@ const MapScript = preload("res://scripts/office_map.gd")
 const MeetingScript = preload("res://scripts/meeting_manager.gd")
 const Analyzer = preload("res://scripts/csv_analyzer.gd")
 const AnalyticsScript = preload("res://scripts/analytics_panel.gd")
+const Advisor = preload("res://scripts/data_advisor.gd")
 var office: OfficeMap
 var team: Array[HQAgent] = []
 var meeting: MeetingManager
@@ -30,6 +31,7 @@ var status_accumulator := 0.0
 var touch_points: Dictionary = {}
 var ui_buttons: Array[Button] = []
 var touch_buttons: Dictionary = {}
+var touch_text_fields: Dictionary = {}
 var csv_picker: FileDialog
 var analytics_layer: Control
 var csv_thread := Thread.new()
@@ -38,6 +40,8 @@ var csv_loading := false
 var last_detail := ""
 var ui_layer: CanvasLayer
 var last_status_label := ""
+var data_request: HTTPRequest
+var current_question := ""
 
 func _ready() -> void:
 	Engine.max_fps = 30
@@ -57,6 +61,10 @@ func _ready() -> void:
 	meeting.message_changed.connect(_on_message)
 	meeting.completed.connect(_on_meeting_complete)
 	_build_ui()
+	data_request = HTTPRequest.new()
+	data_request.timeout = 12.0
+	data_request.request_completed.connect(_on_data_reply)
+	add_child(data_request)
 	_load_summary()
 	_refresh()
 	get_tree().auto_accept_quit = false
@@ -78,7 +86,7 @@ func _process(delta: float) -> void:
 		if csv_result.get("ok", false):
 			analytics_layer = AnalyticsScript.new()
 			ui_layer.add_child(analytics_layer)
-			analytics_layer.setup(csv_result, func(): analytics_layer.queue_free(); analytics_layer = null)
+			analytics_layer.setup(csv_result, func(): analytics_layer.queue_free(); analytics_layer = null, _ask_data_question)
 		else:
 			import_dialog.dialog_text = str(csv_result.get("error", "CSV tidak dapat dibaca."))
 			import_dialog.popup_centered(Vector2i(650, 250))
@@ -198,7 +206,7 @@ func _build_ui() -> void:
 	meet_button = _button(ui, "Panggil Meeting", Rect2(268, 703, 212, 53), _start_meeting, Color("26588d"))
 	pause_button = _button(ui, "Jeda", Rect2(494, 703, 110, 53), func(): paused = not paused; _refresh())
 	_button(ui, "x1 / x2", Rect2(618, 703, 110, 53), func(): speed = 2.0 if speed == 1.0 else 1.0; _log("Kecepatan animasi x%d" % int(speed)))
-	_button(ui, "Analisis CSV", Rect2(742, 703, 160, 53), func(): csv_picker.popup_centered(Vector2i(900, 600)))
+	_button(ui, "Analisis File", Rect2(742, 703, 160, 53), func(): csv_picker.popup_centered(Vector2i(900, 600)))
 	report_button = _button(ui, "Notulen", Rect2(916, 703, 145, 53), _show_minutes)
 	_button(ui, "Reset Kamera", Rect2(1075, 703, 320, 53), func(): world_root.position = Vector2(-12, 5); world_root.scale = Vector2.ONE * 1.04)
 	_label(ui, "Tap robot / ruangan · Geser untuk pan · Scroll / pinch untuk zoom · Spasi: jeda · M: meeting", Rect2(44, 759, 1300, 20), 12, Color("8097af"))
@@ -212,12 +220,12 @@ func _build_ui() -> void:
 	import_dialog.title = "Analisis CSV"
 	ui.add_child(import_dialog)
 	csv_picker = FileDialog.new()
-	csv_picker.title = "Pilih file CSV"
+	csv_picker.title = "Pilih file CSV atau Excel"
 	csv_picker.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	csv_picker.access = FileDialog.ACCESS_FILESYSTEM
 	csv_picker.use_native_dialog = true
-	csv_picker.filters = PackedStringArray(["*.csv ; CSV files"])
-	csv_picker.file_selected.connect(_load_csv)
+	csv_picker.filters = PackedStringArray(["*.csv,*.xlsx ; CSV dan Excel (.xlsx)"])
+	csv_picker.file_selected.connect(_load_data_file)
 	ui.add_child(csv_picker)
 	_label(ui, "FASE 2  ·  ANALISIS CSV LOKAL", Rect2(1080, 759, 330, 20), 12, Color("#62dfb0"))
 
@@ -277,22 +285,53 @@ func _show_minutes() -> void:
 	report_dialog.dialog_text = "DEMO - bukan hasil analisis file / LLM\n\n" + "\n\n".join(meeting.transcript) + "\n\nTersimpan lokal. Ekspor PDF/Excel belum tersedia."
 	report_dialog.popup_centered(Vector2i(850, 400))
 
-func _load_csv(path: String) -> void:
-	var file := FileAccess.open(path, FileAccess.READ)
-	if file == null:
-		import_dialog.dialog_text = "File tidak bisa dibuka. Pilih file CSV lokal lain."
-		import_dialog.popup_centered(Vector2i(600, 220))
-		return
-	if file.get_length() > Analyzer.MAX_BYTES:
-		import_dialog.dialog_text = "Ukuran maksimum CSV adalah 20 MB."
-		import_dialog.popup_centered(Vector2i(600, 220))
-		return
-	var content := file.get_as_text()
-	file.close()
+func _load_data_file(path: String) -> void:
+	if data_request and data_request.is_requesting(): data_request.cancel_request()
+	current_question = ""
+	if is_instance_valid(analytics_layer):
+		analytics_layer.queue_free()
+		analytics_layer = null
 	csv_loading = true
-	csv_thread.start(Callable(Analyzer, "analyze").bind(content))
-	dialogue.text = "[color=#62dfb0]MEMPROSES CSV[/color]\nPerhitungan berjalan lokal di latar belakang."
-	_log("File dipilih. Analisis CSV lokal dimulai.")
+	var err := csv_thread.start(Callable(Analyzer, "analyze_file").bind(path))
+	if err != OK:
+		csv_loading = false
+		import_dialog.dialog_text = "Tidak bisa memulai analisis file. Tutup analisis yang sedang berjalan lalu coba lagi."
+		import_dialog.popup_centered(Vector2i(650, 250))
+		return
+	dialogue.text = "[color=#62dfb0]MEMPROSES FILE[/color]\nPerhitungan berjalan lokal di latar belakang."
+	_log("File dipilih. Analisis lokal dimulai.")
+
+func _ask_data_question(question: String) -> void:
+	current_question = question
+	var q := question.to_lower()
+	if q.contains("omzet") or q.contains("total") or q.contains("revenue") or q.contains("pendapatan") or q.contains("rata") or q.contains("average") or q.contains("produk") or q.contains("laku") or q.contains("terlaris") or q.contains("tertinggi") or q.contains("terendah") or q.contains("sedikit") or q.contains("tren") or q.contains("bulan") or q.contains("ringkas") or q.contains("summary") or q.contains("saran") or q.contains("lihat") or q.contains("cek"):
+		analytics_layer.call("set_answer", Advisor.answer(question, csv_result))
+		return
+	if data_request.is_requesting():
+		analytics_layer.call("set_answer", "Qwen lokal masih menjawab pertanyaan sebelumnya. Coba lagi sebentar.")
+		return
+	var months: Array = csv_result.get("months", {}).keys()
+	months.sort()
+	if months.size() > 8: months = months.slice(months.size() - 8)
+	var facts := {"valid_rows": csv_result.rows, "skipped_rows": csv_result.skipped, "total_revenue": csv_result.total, "average_per_row": csv_result.average, "top_products": csv_result.products, "monthly_revenue": {}}
+	for month in months: facts.monthly_revenue[month] = csv_result.months[month]
+	var payload := {"model": "local", "stream": false, "temperature": 0.2, "max_tokens": 240, "messages": [{"role": "system", "content": "Kamu Agent Data. Jawab dalam bahasa Indonesia berdasarkan fakta ringkas workbook yang diberikan. Jangan mengarang angka atau mengklaim ada kolom yang tidak tersedia. Jika fakta tidak cukup, katakan apa yang kurang. Berikan masukan analisis yang spesifik."}, {"role": "user", "content": "Ringkasan data (agregat lokal): %s\nPertanyaan/perintah: %s" % [JSON.stringify(facts), question]}]}
+	analytics_layer.call("set_answer", "Mencoba menjawab dengan Qwen lokal di Termux… hanya ringkasan angka yang dikirim ke localhost.")
+	var err := data_request.request("http://127.0.0.1:8080/v1/chat/completions", PackedStringArray(["Content-Type: application/json"]), HTTPClient.METHOD_POST, JSON.stringify(payload))
+	if err != OK: analytics_layer.call("set_answer", "Qwen lokal belum tersambung. " + Advisor.answer(question, csv_result))
+
+func _on_data_reply(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	if not is_instance_valid(analytics_layer): return
+	if result != HTTPRequest.RESULT_SUCCESS or response_code < 200 or response_code >= 300:
+		analytics_layer.call("set_answer", "Qwen lokal belum tersambung. " + Advisor.answer(current_question, csv_result))
+		return
+	var parsed = JSON.parse_string(body.get_string_from_utf8())
+	if parsed is Dictionary and not parsed.get("choices", []).is_empty():
+		var answer := str(parsed.choices[0].get("message", {}).get("content", "")).strip_edges()
+		if answer.contains("</think>"): answer = answer.substr(answer.rfind("</think>") + 8).strip_edges()
+		analytics_layer.call("set_answer", answer if not answer.is_empty() else Advisor.answer(current_question, csv_result))
+	else:
+		analytics_layer.call("set_answer", Advisor.answer(current_question, csv_result))
 
 func _save_summary() -> void:
 	var file := FileAccess.open("user://mission_summary.json", FileAccess.WRITE)
@@ -326,6 +365,13 @@ func _input(event: InputEvent) -> void:
 					button.emit_signal("button_down")
 					get_viewport().set_input_as_handled()
 					return
+			for field_node in find_children("*", "LineEdit", true, false):
+				var field := field_node as LineEdit
+				if field.is_visible_in_tree() and field.get_global_rect().has_point(event.position):
+					touch_text_fields[event.index] = field
+					_push_touch_mouse(event.position, true)
+					get_viewport().set_input_as_handled()
+					return
 		elif touch_buttons.has(event.index):
 			var button: Button = touch_buttons[event.index]
 			touch_buttons.erase(event.index)
@@ -333,8 +379,20 @@ func _input(event: InputEvent) -> void:
 			if button.is_visible_in_tree() and not button.disabled and button.get_global_rect().has_point(event.position):
 				button.emit_signal("pressed")
 			get_viewport().set_input_as_handled()
-	if event is InputEventScreenDrag and touch_buttons.has(event.index):
+		elif touch_text_fields.has(event.index):
+			touch_text_fields.erase(event.index)
+			_push_touch_mouse(event.position, false)
+			get_viewport().set_input_as_handled()
+	if event is InputEventScreenDrag and (touch_buttons.has(event.index) or touch_text_fields.has(event.index)):
 		get_viewport().set_input_as_handled()
+
+func _push_touch_mouse(position: Vector2, pressed: bool) -> void:
+	var mouse := InputEventMouseButton.new()
+	mouse.position = position
+	mouse.button_index = MOUSE_BUTTON_LEFT
+	mouse.pressed = pressed
+	mouse.device = InputEvent.DEVICE_ID_EMULATION
+	get_viewport().push_input(mouse, true)
 
 func _unhandled_input(event: InputEvent) -> void:
 	# The Android viewport can dispatch both ScreenTouch and emulated mouse

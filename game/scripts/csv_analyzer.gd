@@ -3,6 +3,24 @@ class_name CSVAnalyzer
 
 const MAX_BYTES := 20 * 1024 * 1024
 const MAX_ROWS := 100000
+const XLSX = preload("res://scripts/xlsx_reader.gd")
+
+static func analyze_file(path: String) -> Dictionary:
+	var size := FileAccess.get_size(path)
+	if size < 0: return {"ok": false, "error": "File tidak bisa dibaca. Coba simpan lalu pilih ulang."}
+	if size > MAX_BYTES: return {"ok": false, "error": "Ukuran file maksimum 20 MB."}
+	if path.to_lower().ends_with(".xlsx"):
+		var workbook := XLSX.read_rows(path)
+		if not workbook.get("ok", false): return workbook
+		var lines: Array[String] = []
+		for row in workbook.rows:
+			var fields: Array[String] = []
+			for cell in row: fields.append('"' + str(cell).replace('"', '""') + '"')
+			lines.append(",".join(fields))
+		return analyze("\n".join(lines))
+	if not path.to_lower().ends_with(".csv"):
+		return {"ok": false, "error": "Pilih berkas .csv atau .xlsx."}
+	return analyze(FileAccess.get_file_as_string(path))
 
 static func analyze(text: String) -> Dictionary:
 	if text.to_utf8_buffer().size() > MAX_BYTES:
@@ -56,6 +74,7 @@ static func analyze(text: String) -> Dictionary:
 		var product := _cell(row, map.product) if map.product >= 0 else "Produk"
 		if product.is_empty(): product = "Tanpa nama"
 		var month := _cell(row, map.date) if map.date >= 0 else "Tanpa tanggal"
+		if month.is_empty(): month = "Tanpa tanggal"
 		if month.length() >= 7: month = month.substr(0, 7)
 		by_month[month] = float(by_month.get(month, 0.0)) + value
 		by_product[product] = float(by_product.get(product, 0.0)) + value
@@ -68,7 +87,7 @@ static func analyze(text: String) -> Dictionary:
 	for name in by_product: top.append({"name": name, "value": by_product[name]})
 	top.sort_custom(func(a, b): return a.value > b.value)
 	if top.size() > 5: top.resize(5)
-	return {"ok": true, "headers": headers, "rows": valid, "skipped": skipped, "total": total, "average": total / valid, "months": by_month, "products": top, "preview": preview}
+	return {"ok": true, "headers": headers, "has_date": map.date >= 0, "rows": valid, "skipped": skipped, "total": total, "average": total / valid, "months": by_month, "products": top, "preview": preview}
 
 static func _cell(row: Array, index: int) -> String:
 	return str(row[index]).strip_edges() if index >= 0 and index < row.size() else ""

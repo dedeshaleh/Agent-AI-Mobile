@@ -1,6 +1,6 @@
 # LLM di Infinix GT 20 Pro
 
-**Tidak diperlukan untuk memainkan demo Fase 1.** Langkah ini untuk benchmark runtime terpisah. Game belum terhubung ke endpoint LLM.
+**Tidak diperlukan untuk gameplay atau analisis data dasar.** Dashboard memakai jawaban lokal deterministik untuk pertanyaan angka yang umum. Server ini opsional untuk pertanyaan bebas berdasarkan agregat spreadsheet.
 
 ## Pilihan model
 
@@ -34,7 +34,7 @@ curl -L --fail --retry 3 -C - \
   -c 2048 -t 4 -ngl 0 --parallel 1
 ```
 
-Server hanya bind ke loopback HP. Jangan menggantinya ke `0.0.0.0` untuk kebutuhan ini. Uji lewat browser HP di `http://127.0.0.1:8080` atau terminal kedua:
+Server hanya bind ke loopback HP. Jangan menggantinya ke `0.0.0.0` untuk kebutuhan ini. APK mengirim pertanyaan bebas ke `http://127.0.0.1:8080/v1/chat/completions`; isi baris mentah spreadsheet tidak dikirim, hanya jumlah baris, total/rata-rata, 5 produk teratas, dan hingga 8 agregat bulan terakhir. Pertanyaan total, rata-rata, tren, atau ranking dijawab langsung oleh game tanpa memanggil model. Uji server lewat browser HP di `http://127.0.0.1:8080` atau terminal kedua:
 
 ```sh
 curl --fail http://127.0.0.1:8080/health

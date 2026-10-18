@@ -1,6 +1,6 @@
 # Agent AI Mobile — Agent HQ
 
-Game kantor AI 2D isometric untuk Android landscape, mengikuti PRD di repositori ini. Target perangkat: Infinix GT 20 Pro / X6871. **Versi saat ini: Fase 2, impor CSV dan analisis lokal; inferensi LLM belum aktif.**
+Game kantor AI 2D isometric untuk Android landscape, mengikuti PRD di repositori ini. Target perangkat: Infinix GT 20 Pro / X6871. **Versi saat ini: Fase 2, impor CSV/XLSX dan analisis lokal.**
 
 ![Screenshot viewport game yang berjalan di laptop](docs/preview.png)
 
@@ -13,10 +13,12 @@ Game kantor AI 2D isometric untuk Android landscape, mengikuti PRD di repositori
 - Tombol Panggil Meeting: semua agent berjalan ke kursi, menunggu tim lengkap, berdialog bergiliran, lalu kembali ke meja.
 - Misi demo, panel status per agent, log, notulen, pause/resume, animasi x1/x2, pan dan zoom.
 - Notulen terakhir disimpan lokal. Saat aplikasi dibuka ulang, robot mulai di meja kerja; misi berjalan belum dipulihkan.
-- Mode demo sepenuhnya offline tanpa model, akun, atau akses jaringan.
-- Impor CSV lokal lewat pemilih dokumen Android, batas 20 MB dan 100.000 baris; file tidak diunggah.
+- Gameplay dan analisis dasar berjalan offline tanpa model atau akun.
+- Impor CSV/XLSX lokal lewat pemilih dokumen Android; membaca lembar pertama workbook (baris header di bagian atas), batas file 20 MB dan 100.000 baris.
 - KPI total/rata-rata omzet, tren bulanan, ranking 5 produk, serta pratinjau 5 baris. Kolom Indonesia/Inggris dikenali otomatis; format angka Indonesia didukung.
-- Analisis CSV berjalan di thread latar belakang agar UI kantor tetap responsif. XLSX, pemetaan kolom manual, ekspor, dan LLM belum tersedia.
+- Saran otomatis menandai baris tak valid, konsentrasi produk dan penurunan bulanan. Kotak tanya-jawab menjawab total, rata-rata, tren serta produk tertinggi/terendah.
+- Pertanyaan bebas dapat memakai Qwen lokal via Termux di alamat `127.0.0.1`; game hanya mengirim agregat (bukan baris mentah). Tanpa server Qwen, jawaban angka dan saran dasar tetap tersedia.
+- Pembacaan spreadsheet berjalan di latar belakang agar simulasi kantor tetap responsif. Pemetaan kolom manual, ekspor, dan model yang tertanam langsung di APK belum tersedia.
 
 **Batas analisis:** sistem menghitung omzet dari kolom `revenue/pendapatan/total/omzet/sales`, atau `qty/jumlah × harga/price`. `diskon` dan pajak belum dihitung. Header tanggal dan produk dipakai untuk pengelompokan; bila tidak ada, hasil tetap menampilkan total dan menandai data tanpa nama/tanggal.
 
@@ -45,13 +47,13 @@ Untuk workspace ini, bisa juga klik dua kali `scripts/Play.cmd` untuk membuka ga
 
 Kontrol: tap/klik robot untuk detail, tap ruangan untuk daftar agent, geser untuk pan, scroll/pinch untuk zoom, Spasi untuk jeda, M untuk meeting. x2 mempercepat simulasi demo; bukan pengaturan kecepatan LLM.
 
-## LLM untuk HP
+## LLM lokal opsional untuk pertanyaan bebas
 
-Pilihan prototipe: **Qwen3 1.7B GGUF Q4_K_M + llama.cpp di Termux**. Setelah benchmark stabil, bandingkan dengan Qwen3 4B Q4 sesuai PRD. Empat agent memakai satu model secara serial. Integrasi ke game belum aktif pada Fase 1.
+Pilihan prototipe: **Qwen3 1.7B GGUF Q4_K_M + llama.cpp di Termux**. Untuk pertanyaan yang bisa dihitung langsung, dashboard menjawab tanpa LLM. Pertanyaan bebas diteruskan ke server kompatibel OpenAI lokal pada `127.0.0.1:8080`; hanya ringkasan angka, produk teratas dan tren bulanan dikirim, bukan isi baris spreadsheet. Jalankan langkah di [setup dan benchmark LLM](docs/LLM_PHONE.md) sebelum mencoba pertanyaan bebas.
 
 Folax tetap dapat digunakan sebagai asisten HP. Proyek ini belum memiliki API/SDK resmi Folax yang bisa diandalkan untuk inferensi offline dari aplikasi lain. Kami tidak mengasumsikan bahwa model Folax dapat dipanggil oleh Godot.
 
-Lihat [setup dan benchmark LLM](docs/LLM_PHONE.md), [arsitektur](docs/ARCHITECTURE.md), serta [status verifikasi](docs/VALIDATION.md).
+Folax tetap dapat dipakai langsung sebagai asisten HP, tetapi proyek belum memiliki API resmi Folax yang bisa dipanggil. Lihat [arsitektur](docs/ARCHITECTURE.md) dan [status verifikasi](docs/VALIDATION.md).
 
 ## Struktur
 

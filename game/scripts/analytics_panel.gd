@@ -3,10 +3,14 @@ class_name AnalyticsPanel
 
 var data: Dictionary = {}
 var close_callback: Callable
+var ask_callback: Callable
+var answer_label: Label
+var question_input: LineEdit
 
-func setup(result: Dictionary, on_close: Callable) -> void:
+func setup(result: Dictionary, on_close: Callable, on_ask: Callable) -> void:
 	data = result
 	close_callback = on_close
+	ask_callback = on_ask
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	_build()
@@ -26,16 +30,43 @@ func _build() -> void:
 	add_child(close)
 	var summary := "%.0f baris valid  ·  %d dilewati" % [data.rows, data.skipped]
 	_label(summary, Vector2(44, 111), Vector2(1000, 25), 15, Color("#62dfb0"))
+	var suggestions := _label(DataAdvisor.suggestions(data), Vector2(880, 445), Vector2(510, 140), 15, Color("#f6c779"))
+	suggestions.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_card("TOTAL OMZET", _money(data.total), Vector2(44, 155), Color("#163d5a"))
 	_card("RATA-RATA / BARIS", _money(data.average), Vector2(500, 155), Color("#173e3b"))
 	_card("PRODUK TERATAS", str(data.products[0].name), Vector2(956, 155), Color("#493451"))
 	_draw_chart(data.get("months", {}))
 	var product_text := "TOP PRODUK\n"
 	for item in data.products: product_text += "\n%s   ·   %s" % [str(item.name), _money(item.value)]
-	_label(product_text, Vector2(880, 300), Vector2(510, 315), 17, Color("#d1dfef"))
+	_label(product_text, Vector2(880, 300), Vector2(510, 140), 15, Color("#d1dfef"))
 	var sample := "PRATINJAU (5 BARIS)\n"
 	for item in data.preview: sample += "\n%s   ·   %s   ·   %s" % [item.month, item.product, _money(item.value)]
-	_label(sample, Vector2(44, 597), Vector2(1300, 175), 15, Color("#a8bbd0"))
+	_label(sample, Vector2(44, 597), Vector2(1300, 125), 14, Color("#a8bbd0"))
+	answer_label = _label("Agent Data siap menjawab berdasarkan ringkasan file ini.", Vector2(44, 716), Vector2(1300, 24), 14, Color("#62dfb0"))
+	question_input = LineEdit.new()
+	question_input.name = "QuestionInput"
+	question_input.placeholder_text = "Tanya: produk terlaris? omzet bulan ini? apa yang perlu dicek?"
+	question_input.position = Vector2(44, 745)
+	question_input.size = Vector2(1120, 45)
+	question_input.add_theme_font_size_override("font_size", 16)
+	question_input.text_submitted.connect(_submit_question)
+	add_child(question_input)
+	var ask := Button.new()
+	ask.text = "Tanya Agent"
+	ask.position = Vector2(1180, 745)
+	ask.size = Vector2(210, 45)
+	ask.pressed.connect(_submit_question.bind(""))
+	add_child(ask)
+
+func _submit_question(override_text := "") -> void:
+	var question := override_text if not override_text.is_empty() else question_input.text.strip_edges()
+	if question.is_empty(): return
+	question_input.text = question
+	answer_label.text = "Agent Data sedang melihat angka ringkasan…"
+	ask_callback.call(question)
+
+func set_answer(value: String) -> void:
+	answer_label.text = value
 
 func _card(heading: String, value: String, at: Vector2, tint: Color) -> void:
 	var panel := Panel.new()
