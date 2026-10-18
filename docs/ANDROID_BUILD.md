@@ -33,6 +33,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Build-Android.ps1
 
 Hasil: `build/AgentHQ-demo.apk`. Periksa error export dan keberadaan file; jangan menganggap test headless membuktikan APK berjalan di Android.
 
+Jika kebijakan PowerShell melarang file `.ps1` di laptop ini, gunakan ekspor melalui editor Godot atau unduh hasil build GitHub. Tidak perlu mengubah kebijakan Windows.
+
 ## Deploy USB ke HP
 
 1. Aktifkan Developer options dan USB debugging di HP.
