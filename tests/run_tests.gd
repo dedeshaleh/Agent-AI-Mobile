@@ -1,4 +1,5 @@
 extends SceneTree
+const Analyzer = preload("res://scripts/csv_analyzer.gd")
 const Map = preload("res://scripts/office_map.gd")
 const Agent = preload("res://scripts/agent.gd")
 const Meeting = preload("res://scripts/meeting_manager.gd")
@@ -10,6 +11,12 @@ func check(ok: bool, message: String) -> void:
 		push_error(message)
 
 func _initialize() -> void:
+	var csv := Analyzer.analyze("tanggal;produk;qty;harga\n2026-01-02;Kopi;2;19.500,50\n2026-02-01;\"Teh, hijau\";1;10.000")
+	assert(csv.get("ok", false), "CSV with semicolon, quotes and Indonesian currency parses")
+	assert(csv.rows == 2 and is_equal_approx(csv.total, 49001.0), "CSV revenue aggregation is deterministic")
+	var quoted := Analyzer.analyze("product,revenue\n\"Tea, green\",12500\nCoffee,7500")
+	assert(quoted.get("ok", false) and is_equal_approx(quoted.total, 20000.0), "CSV quoted comma and direct revenue")
+	assert(not Analyzer.analyze("header\nno numbers").get("ok", true), "Invalid numeric CSV is rejected")
 	call_deferred("run")
 
 func run() -> void:

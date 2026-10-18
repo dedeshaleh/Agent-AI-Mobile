@@ -2,6 +2,8 @@ extends Node2D
 const AgentScript = preload("res://scripts/agent.gd")
 const MapScript = preload("res://scripts/office_map.gd")
 const MeetingScript = preload("res://scripts/meeting_manager.gd")
+const Analyzer = preload("res://scripts/csv_analyzer.gd")
+const AnalyticsScript = preload("res://scripts/analytics_panel.gd")
 var office: OfficeMap
 var team: Array[HQAgent] = []
 var meeting: MeetingManager
@@ -28,6 +30,14 @@ var status_accumulator := 0.0
 var touch_points: Dictionary = {}
 var ui_buttons: Array[Button] = []
 var touch_buttons: Dictionary = {}
+var csv_picker: FileDialog
+var analytics_layer: Control
+var csv_thread := Thread.new()
+var csv_result: Dictionary = {}
+var csv_loading := false
+var last_detail := ""
+var ui_layer: CanvasLayer
+var last_status_label := ""
 
 func _ready() -> void:
 	Engine.max_fps = 30
@@ -58,8 +68,20 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		_save_summary()
 		get_tree().quit()
+	if what == NOTIFICATION_PREDELETE and csv_thread.is_started():
+		csv_thread.wait_to_finish()
 
 func _process(delta: float) -> void:
+	if csv_loading and not csv_thread.is_alive():
+		csv_result = csv_thread.wait_to_finish()
+		csv_loading = false
+		if csv_result.get("ok", false):
+			analytics_layer = AnalyticsScript.new()
+			ui_layer.add_child(analytics_layer)
+			analytics_layer.setup(csv_result, func(): analytics_layer.queue_free(); analytics_layer = null)
+		else:
+			import_dialog.dialog_text = str(csv_result.get("error", "CSV tidak dapat dibaca."))
+			import_dialog.popup_centered(Vector2i(650, 250))
 	if not paused:
 		clock += delta * speed
 		for agent in team:
@@ -95,7 +117,7 @@ func _start_mission() -> void:
 	mission_time = 0
 	for agent in team:
 		agent.set_status("WORKING", "Menyiapkan materi meeting demo")
-	dialogue.text = "[color=#62dfb0]MISI DEMO[/color]\nAgent menyiapkan materi, lalu berkumpul untuk meeting. Analisis file dan LLM belum aktif."
+	dialogue.text = "[color=#62dfb0]MISI DEMO[/color]\nAgent menyiapkan materi, lalu berkumpul untuk meeting. Impor dan analisis CSV tersedia; LLM belum aktif."
 	_log("Misi demo dimulai. Tidak memakai data pengguna atau LLM.")
 	_refresh()
 
@@ -121,12 +143,19 @@ func _refresh() -> void:
 	mission_button.disabled = busy or paused
 	report_button.disabled = meeting.transcript.is_empty()
 	pause_button.text = "Lanjutkan" if paused else "Jeda"
-	status_label.text = "DIJEDA" if paused else ("MEETING AKTIF" if meeting.active else ("MISI DEMO" if mission_time >= 0 else "KANTOR SIAP"))
+	var status_text := "DIJEDA" if paused else ("MEETING AKTIF" if meeting.active else ("MISI DEMO" if mission_time >= 0 else "KANTOR SIAP"))
+	if status_text != last_status_label:
+		status_label.text = status_text
+		last_status_label = status_text
 	for i in team.size():
-		state_labels[i].text = "%s    %s" % [team[i].title, team[i].state]
+		var state_text := "%s    %s" % [team[i].title, team[i].state]
+		if state_labels[i].text != state_text: state_labels[i].text = state_text
 		team[i].selected = i == selected
 	var agent := team[selected]
-	detail.text = "[font_size=22][color=#%s]%s[/color][/font_size]\n%s\n\n[color=#8097af]STATUS[/color]  %s\n%s\n\n[color=#8097af]LOKASI[/color]  %s\n\n[color=#8097af]CATATAN TERAKHIR[/color]\n%s" % [agent.tint.to_html(false), agent.title, ["Validasi dan persiapan data", "KPI dan agregasi deterministik", "Interpretasi dan rekomendasi", "Notulen dan laporan"][selected], agent.state, agent.activity, _room_name(agent.tile), "\n".join(agent.history.slice(maxi(0, agent.history.size() - 3)))]
+	var detail_text := "[font_size=22][color=#%s]%s[/color][/font_size]\n%s\n\n[color=#8097af]STATUS[/color]  %s\n%s\n\n[color=#8097af]LOKASI[/color]  %s\n\n[color=#8097af]CATATAN TERAKHIR[/color]\n%s" % [agent.tint.to_html(false), agent.title, ["Validasi dan persiapan data", "KPI dan agregasi deterministik", "Interpretasi dan rekomendasi", "Notulen dan laporan"][selected], agent.state, agent.activity, _room_name(agent.tile), "\n".join(agent.history.slice(maxi(0, agent.history.size() - 3)))]
+	if detail_text != last_detail:
+		detail.text = detail_text
+		last_detail = detail_text
 
 func _room_name(tile: Vector2i) -> String:
 	var index := office.room_at(tile)
@@ -136,17 +165,17 @@ func _log(message: String) -> void:
 	log_view.append_text("[color=#617d99]%02d:%02d[/color]  %s\n" % [int(clock) / 60, int(clock) % 60, message])
 
 func _build_ui() -> void:
-	var layer := CanvasLayer.new()
-	add_child(layer)
+	ui_layer = CanvasLayer.new()
+	add_child(ui_layer)
 	var ui := Control.new()
 	ui.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	layer.add_child(ui)
+	ui_layer.add_child(ui)
 	_panel(ui, Rect2(24, 22, 1392, 76), Color("101d2d"))
 	_label(ui, "AGENT / HQ", Rect2(45, 35, 260, 35), 27, Color("edf5ff"))
 	_label(ui, "KANTOR AI  /  OFFLINE PLAYGROUND", Rect2(46, 71, 430, 20), 12, Color("8097af"))
 	status_label = _label(ui, "KANTOR SIAP", Rect2(745, 46, 230, 30), 16, Color("62dfb0"))
-	_label(ui, "FASE 1  ·  DEMO TANPA LLM", Rect2(1090, 45, 305, 30), 15, Color("f6b95c"))
+	_label(ui, "FASE 2  ·  ANALISIS CSV LOKAL", Rect2(1090, 45, 305, 30), 15, Color("62dfb0"))
 	_panel(ui, Rect2(1070, 116, 346, 555), Color("101d2d"))
 	_label(ui, "TIM KAMU", Rect2(1090, 132, 290, 28), 15, Color("8097af"))
 	for i in 4:
@@ -169,7 +198,7 @@ func _build_ui() -> void:
 	meet_button = _button(ui, "Panggil Meeting", Rect2(268, 703, 212, 53), _start_meeting, Color("26588d"))
 	pause_button = _button(ui, "Jeda", Rect2(494, 703, 110, 53), func(): paused = not paused; _refresh())
 	_button(ui, "x1 / x2", Rect2(618, 703, 110, 53), func(): speed = 2.0 if speed == 1.0 else 1.0; _log("Kecepatan animasi x%d" % int(speed)))
-	_button(ui, "Upload Data", Rect2(742, 703, 160, 53), func(): import_dialog.popup_centered(Vector2i(560, 230)))
+	_button(ui, "Analisis CSV", Rect2(742, 703, 160, 53), func(): csv_picker.popup_centered(Vector2i(900, 600)))
 	report_button = _button(ui, "Notulen", Rect2(916, 703, 145, 53), _show_minutes)
 	_button(ui, "Reset Kamera", Rect2(1075, 703, 320, 53), func(): world_root.position = Vector2(-12, 5); world_root.scale = Vector2.ONE * 1.04)
 	_label(ui, "Tap robot / ruangan · Geser untuk pan · Scroll / pinch untuk zoom · Spasi: jeda · M: meeting", Rect2(44, 759, 1300, 20), 12, Color("8097af"))
@@ -180,9 +209,17 @@ func _build_ui() -> void:
 	report_dialog.title = "Notulen meeting demo"
 	ui.add_child(report_dialog)
 	import_dialog = AcceptDialog.new()
-	import_dialog.title = "Analisis file - tahap berikutnya"
-	import_dialog.dialog_text = "Fase 1 adalah game playable.\nImpor CSV/XLSX, perhitungan KPI, PDF/Excel dan AI\nbelum diimplementasikan. Tidak ada file yang diunggah."
+	import_dialog.title = "Analisis CSV"
 	ui.add_child(import_dialog)
+	csv_picker = FileDialog.new()
+	csv_picker.title = "Pilih file CSV"
+	csv_picker.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	csv_picker.access = FileDialog.ACCESS_FILESYSTEM
+	csv_picker.use_native_dialog = true
+	csv_picker.filters = PackedStringArray(["*.csv ; CSV files"])
+	csv_picker.file_selected.connect(_load_csv)
+	ui.add_child(csv_picker)
+	_label(ui, "FASE 2  ·  ANALISIS CSV LOKAL", Rect2(1080, 759, 330, 20), 12, Color("#62dfb0"))
 
 func _panel(parent: Node, rect: Rect2, color: Color) -> void:
 	var panel := Panel.new()
@@ -240,6 +277,23 @@ func _show_minutes() -> void:
 	report_dialog.dialog_text = "DEMO - bukan hasil analisis file / LLM\n\n" + "\n\n".join(meeting.transcript) + "\n\nTersimpan lokal. Ekspor PDF/Excel belum tersedia."
 	report_dialog.popup_centered(Vector2i(850, 400))
 
+func _load_csv(path: String) -> void:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		import_dialog.dialog_text = "File tidak bisa dibuka. Pilih file CSV lokal lain."
+		import_dialog.popup_centered(Vector2i(600, 220))
+		return
+	if file.get_length() > Analyzer.MAX_BYTES:
+		import_dialog.dialog_text = "Ukuran maksimum CSV adalah 20 MB."
+		import_dialog.popup_centered(Vector2i(600, 220))
+		return
+	var content := file.get_as_text()
+	file.close()
+	csv_loading = true
+	csv_thread.start(Callable(Analyzer, "analyze").bind(content))
+	dialogue.text = "[color=#62dfb0]MEMPROSES CSV[/color]\nPerhitungan berjalan lokal di latar belakang."
+	_log("File dipilih. Analisis CSV lokal dimulai.")
+
 func _save_summary() -> void:
 	var file := FileAccess.open("user://mission_summary.json", FileAccess.WRITE)
 	if file:
@@ -264,8 +318,9 @@ func _input(event: InputEvent) -> void:
 	# UI button works even when the device doesn't generate mouse events.
 	if event is InputEventScreenTouch:
 		if event.pressed:
-			for index in range(ui_buttons.size() - 1, -1, -1):
-				var button: Button = ui_buttons[index]
+			var buttons := find_children("*", "Button", true, false)
+			for index in range(buttons.size() - 1, -1, -1):
+				var button: Button = buttons[index]
 				if button.is_visible_in_tree() and not button.disabled and button.get_global_rect().has_point(event.position):
 					touch_buttons[event.index] = button
 					button.emit_signal("button_down")

@@ -1,6 +1,6 @@
 # Agent AI Mobile — Agent HQ
 
-Game kantor AI 2D isometric untuk Android landscape, mengikuti PRD di repositori ini. Target perangkat: Infinix GT 20 Pro / X6871. **Versi saat ini: Fase 1, demo playable tanpa LLM.**
+Game kantor AI 2D isometric untuk Android landscape, mengikuti PRD di repositori ini. Target perangkat: Infinix GT 20 Pro / X6871. **Versi saat ini: Fase 2, impor CSV dan analisis lokal; inferensi LLM belum aktif.**
 
 ![Screenshot viewport game yang berjalan di laptop](docs/preview.png)
 
@@ -14,8 +14,11 @@ Game kantor AI 2D isometric untuk Android landscape, mengikuti PRD di repositori
 - Misi demo, panel status per agent, log, notulen, pause/resume, animasi x1/x2, pan dan zoom.
 - Notulen terakhir disimpan lokal. Saat aplikasi dibuka ulang, robot mulai di meja kerja; misi berjalan belum dipulihkan.
 - Mode demo sepenuhnya offline tanpa model, akun, atau akses jaringan.
+- Impor CSV lokal lewat pemilih dokumen Android, batas 20 MB dan 100.000 baris; file tidak diunggah.
+- KPI total/rata-rata omzet, tren bulanan, ranking 5 produk, serta pratinjau 5 baris. Kolom Indonesia/Inggris dikenali otomatis; format angka Indonesia didukung.
+- Analisis CSV berjalan di thread latar belakang agar UI kantor tetap responsif. XLSX, pemetaan kolom manual, ekspor, dan LLM belum tersedia.
 
-**Belum tersedia:** impor CSV/XLSX, perhitungan KPI, inferensi LLM, ekspor PDF/Excel, native Android bridge. Tombol Upload Data menampilkan penjelasan tahap pengembangan, bukan upload palsu. Dialog meeting diberi label demo dan tidak mengklaim menganalisis data.
+**Batas analisis:** sistem menghitung omzet dari kolom `revenue/pendapatan/total/omzet/sales`, atau `qty/jumlah × harga/price`. `diskon` dan pajak belum dihitung. Header tanggal dan produk dipakai untuk pengelompokan; bila tidak ada, hasil tetap menampilkan total dan menandai data tanpa nama/tanggal.
 
 ## Preview langsung di HP
 
@@ -61,4 +64,4 @@ docs/                 Panduan, batasan dan checklist perangkat nyata
 .github/workflows/    Build APK debug di GitHub Actions
 ```
 
-Folder `.tools`, `build`, cache Godot, model GGUF dan keystore tidak masuk Git. Download awal tool membutuhkan internet. Mode demo yang terpasang berjalan offline.
+Folder `.tools`, `build`, cache Godot, model GGUF dan keystore tidak masuk Git. Download awal tool membutuhkan internet. Analisis data yang terpasang berjalan offline.
