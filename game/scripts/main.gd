@@ -26,6 +26,8 @@ var import_dialog: AcceptDialog
 var drag := false
 var status_accumulator := 0.0
 var touch_points: Dictionary = {}
+var ui_buttons: Array[Button] = []
+var touch_buttons: Dictionary = {}
 
 func _ready() -> void:
 	Engine.max_fps = 30
@@ -231,6 +233,7 @@ func _button(parent: Node, value: String, rect: Rect2, callback: Callable, color
 		button.add_theme_stylebox_override(variant, style)
 	button.pressed.connect(callback)
 	parent.add_child(button)
+	ui_buttons.append(button)
 	return button
 
 func _show_minutes() -> void:
@@ -255,7 +258,34 @@ func _load_summary() -> void:
 					meeting.transcript.append(line)
 		_log("Notulen terakhir dipulihkan. Posisi robot dimulai dari meja kerja.")
 
+func _input(event: InputEvent) -> void:
+	# Screen touch coordinates can be routed differently from mouse coordinates
+	# in Android's native viewport. Hit-test the screen touch directly so each
+	# UI button works even when the device doesn't generate mouse events.
+	if event is InputEventScreenTouch:
+		if event.pressed:
+			for index in range(ui_buttons.size() - 1, -1, -1):
+				var button: Button = ui_buttons[index]
+				if button.is_visible_in_tree() and not button.disabled and button.get_global_rect().has_point(event.position):
+					touch_buttons[event.index] = button
+					button.emit_signal("button_down")
+					get_viewport().set_input_as_handled()
+					return
+		elif touch_buttons.has(event.index):
+			var button: Button = touch_buttons[event.index]
+			touch_buttons.erase(event.index)
+			button.emit_signal("button_up")
+			if button.is_visible_in_tree() and not button.disabled and button.get_global_rect().has_point(event.position):
+				button.emit_signal("pressed")
+			get_viewport().set_input_as_handled()
+	if event is InputEventScreenDrag and touch_buttons.has(event.index):
+		get_viewport().set_input_as_handled()
+
 func _unhandled_input(event: InputEvent) -> void:
+	# The Android viewport can dispatch both ScreenTouch and emulated mouse
+	# events. GUI Controls use the emulated event; map gestures use ScreenTouch.
+	if (event is InputEventMouseButton or event is InputEventMouseMotion) and event.device == InputEvent.DEVICE_ID_EMULATION:
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_SPACE:
 			paused = not paused

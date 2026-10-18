@@ -12,6 +12,7 @@
 - Pause membekukan waktu simulasi.
 - Notulen dapat ditampilkan, disimpan dan dipulihkan.
 - Batas zoom diuji; UI smoke test lulus.
+- Penanganan tap UI diarahkan langsung dari `InputEventScreenTouch` ke tombol Android; uji smoke mensimulasikan tekan dan lepas pada tombol Panggil Meeting.
 
 ## APK berhasil dibuat
 

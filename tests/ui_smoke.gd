@@ -32,6 +32,20 @@ func run() -> void:
 	game.meeting.transcript.clear()
 	game._load_summary()
 	check(game.meeting.transcript.size() == 4, "Summary restored")
+	var meeting_button: Button = game.find_children("*", "Button", true, false).filter(func(b: Button): return b.text == "Panggil Meeting")[0]
+	var tap := InputEventScreenTouch.new()
+	tap.position = meeting_button.global_position + meeting_button.size * 0.5
+	tap.pressed = true
+	game._input(tap)
+	await process_frame
+	tap.pressed = false
+	game._input(tap)
+	await process_frame
+	check(game.meeting.active, "Screen touch activates the meeting button")
+	for i in 2000:
+		game._process(1.0 / 30.0)
+	check(not game.meeting.active, "Screen touch meeting finishes")
+	check(game.meeting.transcript.size() == 4, "Screen touch meeting records dialogue")
 	game._zoom(50)
 	check(game.world_root.scale.x <= 1.7001, "Zoom clamped")
 	game.world_root.position = Vector2(-12, 5)
