@@ -1,5 +1,11 @@
 extends SceneTree
 var game: Node
+var failures := 0
+
+func check(ok: bool, message: String) -> void:
+	if not ok:
+		failures += 1
+		push_error(message)
 
 func _initialize() -> void:
 	call_deferred("run")
@@ -9,25 +15,25 @@ func run() -> void:
 	root.add_child(game)
 	await process_frame
 	game._start_mission()
-	assert(game.mission_time == 0, "Demo mission starts")
+	check(game.mission_time == 0, "Demo mission starts")
 	game.paused = true
 	var before: float = game.clock
 	game._process(1.0)
-	assert(game.clock == before, "Pause freezes simulation")
+	check(game.clock == before, "Pause freezes simulation")
 	game.paused = false
 	for i in 2000:
 		game._process(1.0 / 30.0)
-	assert(game.meeting.transcript.size() == 4, "Demo mission completes meeting")
-	assert(not game.meeting.active, "Meeting finishes")
+	check(game.meeting.transcript.size() == 4, "Demo mission completes meeting")
+	check(not game.meeting.active, "Meeting finishes")
 	game._show_minutes()
 	game.report_dialog.hide()
 	game._save_summary()
-	assert(FileAccess.file_exists("user://mission_summary.json"), "Summary saved")
+	check(FileAccess.file_exists("user://mission_summary.json"), "Summary saved")
 	game.meeting.transcript.clear()
 	game._load_summary()
-	assert(game.meeting.transcript.size() == 4, "Summary restored")
+	check(game.meeting.transcript.size() == 4, "Summary restored")
 	game._zoom(50)
-	assert(game.world_root.scale.x <= 1.7001, "Zoom clamped")
+	check(game.world_root.scale.x <= 1.7001, "Zoom clamped")
 	game.world_root.position = Vector2(-12, 5)
 	game.world_root.scale = Vector2.ONE * 1.04
 	game._refresh()
@@ -38,5 +44,5 @@ func run() -> void:
 		var target := ProjectSettings.globalize_path("res://../build/preview.png")
 		capture.save_png(target)
 		print("SCREENSHOT: ", target)
-	print("UI SMOKE: mission, pause, minutes, persistence, zoom passed")
-	quit()
+	print("UI SMOKE: %d failures (mission, pause, minutes, persistence, zoom)" % failures)
+	quit(0 if failures == 0 else 1)

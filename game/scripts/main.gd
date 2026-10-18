@@ -24,8 +24,6 @@ var report_button: Button
 var report_dialog: AcceptDialog
 var import_dialog: AcceptDialog
 var drag := false
-var last_pointer := Vector2.ZERO
-var saved_mission: Dictionary = {}
 var status_accumulator := 0.0
 var touch_points: Dictionary = {}
 
@@ -273,7 +271,6 @@ func _unhandled_input(event: InputEvent) -> void:
 			_zoom(1.0 / 1.08)
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			drag = event.pressed
-			last_pointer = event.position
 			if event.pressed:
 				_pick(event.position)
 	if event is InputEventMouseMotion and drag:

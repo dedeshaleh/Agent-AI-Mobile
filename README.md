@@ -34,6 +34,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Play.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\Test.ps1
 ```
 
+Jika kebijakan PowerShell laptop melarang file `.ps1`, jalankan lewat editor Godot. Tidak perlu mengubah kebijakan keamanan Windows.
+
 Kontrol: tap/klik robot untuk detail, tap ruangan untuk daftar agent, geser untuk pan, scroll/pinch untuk zoom, Spasi untuk jeda, M untuk meeting. x2 mempercepat simulasi demo; bukan pengaturan kecepatan LLM.
 
 ## LLM untuk HP
