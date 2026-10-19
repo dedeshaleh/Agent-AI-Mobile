@@ -31,7 +31,9 @@ The user usually connects with **Wireless debugging** (Android 11+), not USB:
 2. Connect: the connect port is different from the pairing port and changes whenever Wireless debugging restarts. Run `& $adb mdns services` and look for the `_adb-tls-connect._tcp` entry; adb usually auto-connects. Otherwise run `& $adb connect <IP:connectPort>` using the "IP address & Port" on the Wireless debugging screen.
 3. Connect only to the user's phone (`model:Infinix_X6871`). Other `_adb._tcp` services on the office network belong to other people; ignore them.
 
-When a wireless device is connected, pass `-s <serial>` if more than one device is listed.
+When a wireless device is connected, pass `-s <serial>` only if more than one device is listed. Prefer no `-s` at all: after a reconnect the phone often appears only under its mDNS serial (`adb-…._adb-tls-connect._tcp`) and a stale `-s 192.168.x.x:port` makes adb hang on "waiting for device".
+
+Large pushes (≈1 GB GGUF) over Wi-Fi debugging drop the connection on this phone; download models inside the app instead of `adb push`.
 
 `pm list packages` may print `SecurityException ... user 999` on XOS (dual-app profile). This is harmless.
 
