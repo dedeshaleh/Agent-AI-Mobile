@@ -5,3 +5,16 @@ game/export_credentials.cfg
 *.keystore
 *.gguf
 *.log
+
+# Flutter + Unity + native
+app/android/unityLibrary/
+app/android/app/.cxx/
+app/android/app/src/main/cpp/third_party/
+app/android/local.properties
+unity/AgentHQ/Library/
+unity/AgentHQ/Temp/
+unity/AgentHQ/Logs/
+unity/AgentHQ/obj/
+unity/AgentHQ/UserSettings/
+unity/AgentHQ/*.csproj
+unity/AgentHQ/*.sln

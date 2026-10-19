@@ -1,10 +1,10 @@
 # PRD & Technical Blueprint — AI Agent HQ Android Offline
 
-**Versi:** 1.0  
+**Versi:** 1.2 (2026-10-19 — host Flutter, AI embedded full lokal, provider AI eksternal via API key, game layer **Unity** menggantikan Godot)  
 **Target:** Infinix X6871, Android 15 / XOS 15.1.2, Dimensity 8200 Ultimate, RAM fisik 12 GB, storage 256 GB  
 **Tujuan:** Game simulasi kantor AI 2D isometric dengan 4–8 karakter agent yang bergerak, meeting, menganalisis file pengguna, dan menghasilkan laporan secara lokal.
 
-> Dokumen ini adalah spesifikasi implementasi untuk Codex. Jangan mengganti game interaktif dengan gambar statis atau mockup. Semua pekerjaan harus dapat diuji pada perangkat Android nyata.
+> Dokumen ini adalah spesifikasi implementasi. **Perubahan v1.1:** aplikasi host menjadi **Flutter**; LLM lokal di-embed langsung di APK Flutter (tanpa Termux/server terpisah) dan pengguna dapat menambahkan AI lain melalui API key (lihat §6). **Perubahan v1.2:** game layer dibuat dengan **Unity 6.3 LTS** yang ditanam ke Flutter lewat `flutter_embed_unity`; proyek Godot (`game/`) menjadi referensi Fase 1–2 saja. Jangan mengganti game interaktif dengan gambar statis atau mockup. Semua pekerjaan harus dapat diuji pada perangkat Android nyata.
 
 ## 1. Prinsip produk
 
@@ -14,6 +14,8 @@
 - **Deterministik untuk angka:** perhitungan KPI dilakukan oleh kode/SQL, bukan dikarang oleh LLM.
 - **Keamanan lokal:** file pengguna diproses dalam sandbox aplikasi; tool sensitif membutuhkan persetujuan.
 - **Skalabilitas:** 4 agent MVP; 8 agent setelah profiling.
+- **AI embedded:** LLM lokal berjalan di dalam APK Flutter (llama.cpp via FFI), bukan proses/server eksternal. Mode default **Offline Only**.
+- **Bring-your-own AI:** pengguna boleh menambah provider AI lain (OpenAI-compatible, Claude, Gemini, endpoint kustom) dengan API key miliknya sendiri; selalu opt-in dan bisa dimatikan total.
 
 ## 2. Spesifikasi perangkat & batasan
 
@@ -77,29 +79,110 @@ Animasi minimal: `idle`, `walk_up`, `walk_down`, `walk_left`, `walk_right`, `sit
 ## 5. Arsitektur teknis
 
 ```text
-Godot 4 Android APK (UI, map, sprites, state machine, navigation)
-       |
-       | typed local bridge / loopback API
-       v
-Agent Orchestrator (queue, workflow, tools, approvals)
-       |                       |
-       |                       +--> Dataset Engine (CSV/Excel, SQL, chart data)
-       |                       +--> Report Engine (PDF/Excel)
-       |                       +--> SQLite (missions, agent states, logs)
-       v
-Shared Local LLM Runtime (llama.cpp / compatible Android arm64)
-       |
-       +--> Qwen3 4B GGUF Q4 (one loaded model)
+Flutter Android APK (host app: navigasi, panel, chat, pengaturan AI, file picker)
+  |
+  +--> Game View: Unity 6.3 embedded (flutter_embed_unity, §6.2) <-- JSON --+
+  |                                                                         |
+  v                                                                         |
+Agent Orchestrator (Dart: queue, workflow, tools, approvals) ---------------+
+  |                       |
+  |                       +--> Dataset Engine (CSV/Excel, SQL, chart data)
+  |                       +--> Report Engine (PDF/Excel)
+  |                       +--> SQLite (missions, agent states, logs, usage)
+  v
+AI Router (pilih provider per agent, fallback, mode Offline/Hybrid)
+  |
+  +--> LocalLlamaProvider: llama.cpp arm64 (.so di APK) via dart:ffi, Isolate terpisah
+  |        +--> Qwen3 4B / 1.7B GGUF Q4 (satu model dimuat)
+  |
+  +--> Remote providers (opsional, API key pengguna, HTTPS)
+           +--> OpenAI-compatible | Anthropic Claude | Google Gemini | Custom base URL
 ```
 
-**Penting:** Python/FastAPI di Android tidak otomatis tersedia sebagai service di APK Godot. Pilih salah satu strategi setelah spike teknis:
+**Keputusan v1.1:** target produksi adalah **satu APK Flutter standalone** yang memuat runtime llama.cpp sendiri. Python/FastAPI dan Termux tidak dipakai di produksi.
 
-- **Pilihan A, target produksi:** Godot Android + plugin Android native Kotlin/JNI untuk menjalankan llama.cpp, parser data, dan report engine native/embedded. Implementasi paling rapi, tetapi integrasi lebih kompleks.
-- **Pilihan B, prototipe developer:** Godot + Termux yang menjalankan `llama-server` dan service analitik di `127.0.0.1`. Membutuhkan setup manual dan lifecycle Android dapat menghentikan service; **bukan** APK standalone.
+- **Target produksi:** Flutter + llama.cpp (library native arm64-v8a) dipanggil lewat `dart:ffi` dari Isolate terpisah. Detail di §6.
+- **Prototipe developer (lama):** Godot + Termux `llama-server` di `127.0.0.1` (lihat `docs/LLM_PHONE.md`). Tetap boleh dipakai untuk benchmark awal, tetapi **bukan** jalur rilis.
 
-**Keputusan milestone:** buktikan dulu inferensi Qwen3 4B Q4 di HP dengan benchmark RAM, tokens/s, thermal, dan stabilitas. Baru pilih A atau B. Jangan menjanjikan satu APK offline sebelum native bridge teruji.
+**Keputusan milestone:** buktikan dulu inferensi Qwen3 4B Q4 **di dalam aplikasi Flutter** di HP dengan benchmark RAM, tokens/s, thermal, dan stabilitas, termasuk saat game view terbuka. Jangan menjanjikan APK offline penuh sebelum spike ini lulus.
 
-## 6. Desain multi-agent
+## 6. AI embedded di Flutter & provider AI eksternal
+
+### 6.1 Tujuan
+
+1. AI berjalan **full lokal di HP**: tidak butuh internet, Termux, PC, atau server setelah model terpasang.
+2. AI tertanam di aplikasi Flutter: load/unload model, streaming token, dan pembatalan dikendalikan dari aplikasi.
+3. Pengguna dapat **menambahkan AI lain dengan API key** dan memilih model mana yang dipakai tiap agent, tanpa mengubah alur misi atau kontrak tools.
+
+### 6.2 Flutter sebagai host & posisi game
+
+Flutter memegang UI aplikasi, chat advisor, pengaturan AI, manajer model, file picker (SAF), dan orchestrator. Untuk layer game ada dua opsi yang diputuskan lewat spike:
+
+| Opsi | Cara | Kelebihan | Risiko |
+|---|---|---|---|
+| **G1 — Unity embedded** (**dipilih, v1.2**) | Proyek Unity 6.3 LTS (`unity/AgentHQ`, URP, IL2CPP, ARM64) diekspor sebagai `unityLibrary` dan ditampilkan lewat widget `EmbedUnity` dari plugin `flutter_embed_unity` (MIT). Flutter mengirim perintah JSON (`walkTo`, `setState`, `speak`, `meeting`, …) ke GameObject `FlutterBridge`; Unity mengirim event (`ready`, `arrived`, `agentTapped`, `roomTapped`, `meetingSeated`). Grid, ruangan, kursi, dan A* diport 1:1 dari `game/scripts/office_map.gd`. | Engine matang, tooling kuat, aset 3D/2D mudah ditambah; logika game teruji dengan EditMode test. | Dua engine dalam satu proses (RAM bersaing dengan LLM); plugin memakai API Unity tak terdokumentasi sehingga versi Unity/Flutter/AGP harus dipin; hanya satu widget Unity per layar; Unity tetap di memori setelah dimuat. |
+| **G2 — Flame (cadangan)** | Peta isometric, agent, dan meeting ditulis ulang dengan Flame (Dart). | Satu engine, tanpa bridge, APK lebih kecil. | Menulis ulang game; pathfinding/collision perlu diverifikasi ulang. |
+
+**Kriteria tetap dipantau:** dengan Qwen3 4B Q4 dimuat, game view stabil ≥30 FPS, tidak OOM, dan pause/resume aman. Bila G1 gagal, pindah ke G2. Logika data GDScript (`csv_analyzer`, `xlsx_reader`, `data_advisor`) **sudah diport ke Dart** (`app/lib/data`) dengan fixture tes yang sama. Tanpa export Unity, aplikasi memakai `SimulatedGameBridge` (papan status) agar alur misi tetap dapat diuji; itu bukan pengganti game.
+
+### 6.3 Runtime LLM lokal (embedded)
+
+- **Engine:** llama.cpp di-build sebagai shared library `arm64-v8a` dan dibundel di APK; dipanggil via `dart:ffi` (boleh memakai paket binding yang ada setelah dievaluasi lisensi dan versinya, atau binding tipis buatan sendiri). Alternatif yang boleh dibandingkan di spike: MediaPipe / LiteRT LLM Inference (format model berbeda).
+- **Isolate terpisah:** load model, prompt processing, dan generate tidak pernah di UI isolate. Token di-stream ke UI lewat `Stream` dan di-batch (mis. tiap 50–100 ms), bukan per frame.
+- **Satu model, satu inferensi aktif:** model dimuat sekali dan dipakai bergantian oleh semua agent lokal via antrean prioritas (§7). Mendukung cancel, timeout, dan unload saat memori tertekan (`onTrimMemory`).
+- **Parameter awal:** context 2048 (naik ke 4096 setelah benchmark), output 256–512 token, 4 thread, CPU-only. GPU/NPU hanya setelah profiling.
+- **Structured output:** gunakan grammar/JSON schema llama.cpp untuk output agent agar valid secara struktur.
+- **Model tidak dibundel di APK.** Manajer model di aplikasi:
+  - Unduh dari daftar URL yang dikurasi (mis. Hugging Face) dengan resume, verifikasi SHA-256, dan cek sisa storage sebelum unduh.
+  - Atau impor file `.gguf` lokal lewat SAF (sepenuhnya offline).
+  - Daftar model terpasang, ukuran, model aktif, hapus model.
+  - Rekomendasi default: Qwen3 1.7B Q4_K_M (aman), Qwen3 4B Q4_K_M (target PRD).
+- **Offline penuh:** setelah model ada di storage privat aplikasi, seluruh fitur AI lokal berjalan dalam mode pesawat.
+
+### 6.4 Provider AI eksternal via API key
+
+Semua AI diakses lewat satu antarmuka sehingga orchestrator tidak perlu tahu apakah model lokal atau cloud:
+
+```dart
+abstract class AiProvider {
+  String get id;            // "local-llama", "openai", "anthropic", ...
+  bool get isLocal;
+  AiCapabilities get caps;  // streaming, jsonSchema, contextWindow
+  Stream<AiChunk> chat(AiRequest req, {CancelToken? cancel});
+  Future<HealthResult> healthCheck();
+}
+```
+
+| Jenis provider | Konfigurasi pengguna | Catatan |
+|---|---|---|
+| Lokal (llama.cpp) | Pilih model GGUF | Default, selalu tersedia bila model terpasang |
+| OpenAI-compatible | Base URL, API key, model id | Mencakup OpenAI, OpenRouter, Groq, DeepSeek, dsb. yang kompatibel `/v1/chat/completions` |
+| Anthropic Claude | API key, model id | Messages API |
+| Google Gemini | API key, model id | Gemini API |
+| Custom / LAN | Base URL (+ key opsional) | Mis. Ollama/LM Studio di PC dalam jaringan yang sama; HTTP hanya untuk alamat LAN/loopback dan harus dikonfirmasi pengguna |
+
+Model id **tidak di-hardcode** di kode; disimpan di konfigurasi provider dan bisa diubah tanpa rilis baru. **Tes Koneksi** wajib berhasil sebelum provider bisa dipakai.
+
+**Layar Pengaturan AI:**
+
+- Daftar provider (lokal + yang ditambahkan) dengan status: siap / key invalid / offline / kuota habis.
+- **Tambah Provider:** pilih jenis → isi base URL / API key / model → Tes Koneksi → simpan.
+- **Penugasan per agent:** contoh Data = Lokal, Analyst = Lokal, Strategist = Claude, Reporter = Lokal. Default semua Lokal.
+- **Mode global:** `Offline Only` (default; semua provider remote nonaktif, tanpa panggilan jaringan) · `Hybrid` (remote hanya untuk agent yang ditugaskan, fallback ke lokal) · `Cloud Preferred` (remote dulu, lokal sebagai fallback).
+- **Fallback:** bila remote gagal (timeout, 401, 429, tanpa jaringan) → retry terbatas lalu pindah ke provider lokal dan tampilkan toast; misi tidak gagal hanya karena cloud.
+- **Pemakaian:** log token masuk/keluar per provider dan per misi, estimasi biaya bila tarif diisi pengguna, batas harian opsional.
+
+### 6.5 Keamanan API key & data
+
+- API key disimpan dengan `flutter_secure_storage` (Android Keystore). **Tidak** disimpan di SQLite, SharedPreferences biasa, log, laporan, ekspor, atau backup (`allowBackup=false` atau aturan exclude).
+- Key ditampilkan termasking (`sk-…abcd`), bisa diganti dan dihapus; menghapus provider ikut menghapus key-nya.
+- Hanya HTTPS untuk provider internet; validasi sertifikat tidak boleh di-bypass.
+- **Data minimum ke cloud:** default hanya ringkasan/agregat hasil tool (KPI, top produk, agregat periode), bukan baris mentah atau file. Mengirim baris mentah memerlukan opsi terpisah yang dinyalakan eksplisit.
+- Sebelum panggilan remote pertama per misi, tampilkan **pratinjau payload** (provider tujuan + data yang akan dikirim) dan minta persetujuan; persetujuan bisa diingat per provider.
+- Penanda sumber di bubble chat/agent: ikon lokal atau nama provider cloud, agar pengguna tahu asal jawaban.
+- Aturan anti-halusinasi angka tetap berlaku untuk semua provider: KPI hanya dari tool, output divalidasi dengan schema yang sama.
+
+## 7. Desain multi-agent
 
 ### State agent
 
@@ -109,7 +192,8 @@ Error path: `FAILED -> RETRY/NEEDS_USER_ACTION`; pause: `PAUSED`.
 ### Shared LLM scheduler
 
 - Maksimal **1 inferensi aktif** pada MVP; request lain masuk antrean prioritas.
-- Masing-masing agent memiliki system prompt, tools allowlist, konteks tugas yang diringkas, dan token budget.
+- Masing-masing agent memiliki system prompt, tools allowlist, konteks tugas yang diringkas, token budget, dan **provider yang ditugaskan** (default lokal).
+- Antrean satu inferensi berlaku untuk provider lokal; agent yang ditugaskan ke provider remote boleh berjalan paralel dengan batas konkurensi dan rate limit per provider.
 - Batasi context awal 2k–4k dan output 256–512 token per giliran; parameter harus bisa diubah setelah benchmark.
 - Gunakan structured JSON output dengan validasi schema; jika invalid, retry terbatas dan fallback ke template.
 - Meeting diatur oleh turn manager (Data → Analyst → Strategist → Reporter), bukan empat model berjalan paralel.
@@ -119,9 +203,9 @@ Error path: `FAILED -> RETRY/NEEDS_USER_ACTION`; pause: `PAUSED`.
 
 `inspect_dataset`, `map_columns`, `validate_rows`, `compute_kpi`, `aggregate_by_period`, `rank_products`, `generate_chart_data`, `write_meeting_minutes`, `export_pdf`, `export_xlsx`.
 
-Tools baca-only sebagai default. Tidak ada shell execution, akses SSH, internet, atau eksekusi kode arbitrer pada MVP. Jika ditambah nanti, harus sandbox dan memerlukan persetujuan pengguna.
+Tools baca-only sebagai default. Tidak ada shell execution, akses SSH, eksekusi kode arbitrer, atau akses internet **oleh tools** pada MVP (koneksi ke provider AI remote hanya lewat AI Router, bukan tool). Jika ditambah nanti, harus sandbox dan memerlukan persetujuan pengguna.
 
-## 7. Kontrak data
+## 8. Kontrak data
 
 ```json
 {
@@ -150,7 +234,7 @@ Tools baca-only sebagai default. Tidak ada shell execution, akses SSH, internet,
 
 Nilai `0` di atas placeholder, bukan hasil analisis. Tambahkan mata uang, timezone, periode, formula, lineage file/sheet, dan error handling dalam implementasi nyata.
 
-## 8. UI/UX & performa
+## 9. UI/UX & performa
 
 - Tampilan landscape utama; portrait boleh menampilkan pesan rotasi.
 - Canvas game isometric 2D, panel overlay minimal, zoom/pan kamera, tombol besar untuk layar sentuh.
@@ -160,23 +244,43 @@ Nilai `0` di atas placeholder, bukan hasil analisis. Tambahkan mata uang, timezo
 - Streaming status/progress ke Godot via signal/event queue; jangan mengirim token ke UI setiap frame.
 - Saat aplikasi di-background, simpan state misi dan lakukan pause/resume aman. Jangan mengasumsikan background execution tanpa batas di Android.
 
-## 9. Data, privasi, dan keselamatan
+## 10. Data, privasi, dan keselamatan
 
 - Semua file lokal dan laporan berada di penyimpanan privat aplikasi hingga pengguna memilih ekspor.
 - Gunakan SAF untuk pemilihan file dan penyimpanan hasil; hindari izin akses seluruh storage.
 - Batas ukuran file awal 20 MB (konfigurabel); batas baris dan memory pressure ditentukan hasil profiling.
 - Validasi MIME/ekstensi, schema, nilai kosong, tanggal, duplikat, encoding, formula Excel dan input berbahaya.
 - Perlakukan isi file sebagai **data tak tepercaya**, bukan instruksi untuk agent.
-- Hindari mengirim data ke layanan cloud tanpa opt-in eksplisit.
-- Sediakan hapus dataset, riwayat misi, cache, dan model yang tidak dipakai.
+- Hindari mengirim data ke layanan cloud tanpa opt-in eksplisit; aturan provider remote dan API key mengikuti §6.5.
+- Mode `Offline Only` harus benar-benar tanpa panggilan jaringan (diverifikasi dengan mode pesawat dan log jaringan).
+- Sediakan hapus dataset, riwayat misi, cache, model yang tidak dipakai, log pemakaian, dan semua API key.
 
-## 10. Struktur repositori yang disarankan
+## 11. Struktur repositori yang disarankan
 
 ```text
 ai-agent-hq/
 ├── README.md
 ├── PRD_AI_Agent_HQ_Android_Offline_Infinix_X6871.md
-├── game/
+├── app/                  # Flutter host app (baru di v1.1)
+│   ├── pubspec.yaml
+│   ├── lib/
+│   │   ├── ai/
+│   │   │   ├── ai_provider.dart
+│   │   │   ├── ai_router.dart
+│   │   │   ├── local_llama_provider.dart   # dart:ffi + Isolate
+│   │   │   ├── openai_compatible_provider.dart
+│   │   │   ├── anthropic_provider.dart
+│   │   │   ├── gemini_provider.dart
+│   │   │   └── model_manager.dart          # unduh/impor/verifikasi GGUF
+│   │   ├── agents/       # orchestrator, prompts, tool contracts
+│   │   ├── data/         # parser CSV/XLSX, KPI (port dari GDScript)
+│   │   ├── reports/
+│   │   ├── game_bridge/  # protokol JSON, UnityGameBridge, SimulatedGameBridge
+│   │   └── ui/           # chat, pengaturan AI, manajer model
+│   ├── android/          # llama.cpp .so arm64-v8a, plugin Kotlin
+│   └── test/
+├── unity/AgentHQ/        # Unity 6.3 LTS: OfficeGrid, AgentController, OfficeDirector, FlutterBridge, Editor setup, tests
+├── game/                 # Godot Fase 1–2 (referensi; tidak dipakai aplikasi Flutter)
 │   ├── project.godot
 │   ├── scenes/
 │   │   ├── Main.tscn
@@ -194,26 +298,25 @@ ai-agent-hq/
 │       ├── tiles/
 │       ├── sprites/
 │       └── ui/
-├── android_bridge/       # Kotlin/JNI setelah spike
-├── runtime/              # integrasi llama.cpp; model binary tidak di-commit
-├── agent_core/           # workflow, tool contracts, prompts
-├── data_engine/          # parsing & agregasi
-├── report_engine/        # PDF/Excel
+├── runtime/              # script build llama.cpp Android; model binary tidak di-commit
 ├── tests/
 └── docs/
     ├── BENCHMARK.md
     ├── ARCHITECTURE.md
+    ├── AI_PROVIDERS.md
+    ├── FLUTTER_UNITY.md
     └── ANDROID_BUILD.md
 ```
 
-## 11. Roadmap implementasi
+## 12. Roadmap implementasi
 
 ### Fase 0 — Validasi hardware dan model
 
-- Jalankan Qwen3 4B GGUF Q4 di Android menggunakan runtime yang kompatibel.
+- Jalankan Qwen3 4B GGUF Q4 di Android menggunakan runtime yang kompatibel (Termux boleh untuk angka awal).
+- **Spike Flutter:** aplikasi Flutter minimal yang memuat llama.cpp via FFI di Isolate, streaming token, cancel, dan unload; uji bersama game view Unity embedded (G1), Flame (G2) bila perlu.
 - Catat RAM peak, prompt processing, generation tokens/s, suhu/throttling, crash, penggunaan baterai.
 - Uji saat game Godot sederhana terbuka. Jika tidak stabil, fallback ke model 1.7B–3B quantized.
-- **Lulus:** model menjawab prompt berulang tanpa OOM, game tetap responsif.
+- **Lulus:** model menjawab prompt berulang **dari dalam APK Flutter** tanpa OOM dan tanpa Termux, game tetap responsif; keputusan G1/G2 tercatat di `docs/ARCHITECTURE.md`.
 
 ### Fase 1 — Game playable tanpa LLM
 
@@ -228,11 +331,18 @@ ai-agent-hq/
 - KPI, tren, top produk, grafik, hasil tersimpan SQLite.
 - **Lulus:** angka cocok dengan fixture pengujian; input buruk ditolak secara jelas.
 
-### Fase 3 — LLM dan multi-agent
+### Fase 3 — LLM lokal embedded dan multi-agent
 
-- Satu runtime lokal, queue inferensi, prompt agent, JSON schema, progress events.
+- Satu runtime lokal di APK Flutter, manajer model (unduh/impor/verifikasi), queue inferensi, prompt agent, JSON schema, progress events.
 - Meeting menggunakan insight yang bersumber dari tool hasil analisis.
-- **Lulus:** 4 agent menyelesaikan satu misi tanpa angka fiktif; tidak crash ketika antrean penuh.
+- **Lulus:** 4 agent menyelesaikan satu misi **dalam mode pesawat** tanpa angka fiktif; tidak crash ketika antrean penuh.
+
+### Fase 3B — Provider AI eksternal (API key)
+
+- Antarmuka `AiProvider`, AI Router, provider OpenAI-compatible, Claude, Gemini, dan custom base URL.
+- Layar Pengaturan AI, Tes Koneksi, penugasan per agent, mode Offline Only/Hybrid/Cloud Preferred, fallback ke lokal, log token/biaya.
+- Penyimpanan key aman, pratinjau payload, penanda sumber lokal/cloud.
+- **Lulus:** pengguna menambah minimal satu provider dengan API key sendiri, menugaskannya ke satu agent, dan misi selesai; saat jaringan diputus misi tetap selesai lewat fallback lokal; key tidak muncul di log, SQLite, atau ekspor.
 
 ### Fase 4 — Laporan dan kualitas
 
@@ -245,7 +355,7 @@ ai-agent-hq/
 - Tambah 8 agent, penjadwalan misi, personalisasi avatar, suara lokal, fitur prediksi stok.
 - Fitur prediksi wajib memiliki dataset temporal, train/test split berbasis waktu, metrik MAE/RMSE/sMAPE, dan label estimasi; jangan menyamakan narasi LLM dengan forecasting statistik.
 
-## 12. Acceptance criteria utama
+## 13. Acceptance criteria utama
 
 - [ ] APK benar-benar dapat diinstal di Infinix X6871.
 - [ ] Semua ruangan terlihat dan dapat dijelajahi di landscape.
@@ -253,6 +363,11 @@ ai-agent-hq/
 - [ ] Tombol meeting membuat keempat robot menuju kursi, duduk, dan berdialog bergantian.
 - [ ] Game tetap bisa dijalankan tanpa LLM (demo mode).
 - [ ] LLM offline memakai satu model bersama, bukan 4 model di RAM.
+- [ ] LLM lokal berjalan di dalam APK Flutter (tanpa Termux/PC/server) dan berfungsi dalam mode pesawat.
+- [ ] Model GGUF dapat diunduh atau diimpor dari aplikasi, diverifikasi, dan dihapus.
+- [ ] Pengguna dapat menambah, menguji, dan menghapus provider AI lain dengan API key; key tersimpan aman dan tidak bocor ke log/ekspor.
+- [ ] Mode Offline Only tidak membuat panggilan jaringan; Hybrid melakukan fallback ke lokal saat cloud gagal.
+- [ ] Setiap jawaban AI menampilkan sumbernya (lokal atau nama provider).
 - [ ] CSV dan XLSX dapat dipilih melalui file picker Android.
 - [ ] KPI dihitung dari data, bukan dihasilkan bebas oleh LLM.
 - [ ] Hasil meeting dan laporan dapat ditelusuri ke sumber perhitungan.
@@ -260,11 +375,13 @@ ai-agent-hq/
 - [ ] Error/OOM/file rusak tidak menghapus misi lain.
 - [ ] Benchmark perangkat nyata didokumentasikan.
 
-## 13. Instruksi siap tempel ke Codex
+## 14. Instruksi siap tempel ke Codex
 
 > Implementasikan proyek **AI Agent HQ** sesuai PRD ini. Jangan membuat dashboard statis. Kerjakan **Fase 1 lebih dahulu** sebagai game Godot 4 2D isometric playable untuk Android landscape: empat ruangan (Data, Analisis, Meeting, Laporan), empat robot warna berbeda, animasi idle/walk/sit/typing/talk, pathfinding dan collision, interaksi tap, status pekerjaan, serta tombol Panggil Meeting yang membuat semua robot berjalan ke kursi meeting, duduk, dan berdialog bergantian. Buat kode modular, aset placeholder orisinal sederhana, scene Godot, README build Android, dan pengujian dasar. Jangan mengklaim APK atau fitur berjalan sebelum build dan pengujian nyata. Setelah Fase 1 lolos, lanjutkan Fase 0 benchmark LLM bila belum dilakukan, lalu Fase 2–4 bertahap. Setiap fase harus menghasilkan checklist acceptance criteria, instruksi menjalankan, dan daftar keterbatasan.
+>
+> **Tambahan v1.1:** aplikasi host dibuat dengan **Flutter**. LLM lokal di-embed di APK (llama.cpp via `dart:ffi` di Isolate terpisah, satu model, satu inferensi aktif) dan harus berjalan full offline di HP. Bangun antarmuka `AiProvider` + AI Router agar pengguna dapat menambahkan AI lain (OpenAI-compatible, Claude, Gemini, custom base URL) dengan API key sendiri, disimpan di `flutter_secure_storage`, default mode Offline Only, dengan fallback ke model lokal. Game layer memakai **Unity 6.3 LTS** yang ditanam lewat `flutter_embed_unity` (bukan Godot). Kerjakan spike Fase 0 (Flutter + llama.cpp + Unity embedded) dan catat RAM/FPS sebelum menaikkan model ke 4B.
 
-## 14. Catatan risiko & keputusan terbuka
+## 15. Catatan risiko & keputusan terbuka
 
 1. Performa Qwen3 4B pada CPU perangkat belum dibenchmark; fallback model lebih kecil harus tersedia.
 2. Godot + llama.cpp sebagai **APK standalone** membutuhkan integrasi Android native yang belum terbukti dalam proyek ini.
@@ -272,8 +389,13 @@ ai-agent-hq/
 4. Dukungan GPU/NPU untuk LLM tidak diasumsikan; optimasi dilakukan hanya setelah profiling.
 5. Pengolahan Excel besar bisa membebani memori; gunakan streaming/batas ukuran atau konversi terkontrol.
 6. Asset game harus dibuat sendiri atau memiliki lisensi yang sesuai.
+7. Unity embedded di Flutter (G1) berarti dua engine dalam satu proses; overhead RAM bisa menekan ruang untuk model 4B. Plugin `flutter_embed_unity` bergantung pada API internal Unity; pin versi Unity 6000.3.x, Flutter, dan AGP. Fallback: G2 (Flame) atau model 1.7B.
+8. Model GGUF berukuran ~1–2,5 GB; unduhan pertama butuh internet dan storage cukup. APK tidak membundel model.
+9. API key milik pengguna bisa bocor bila salah simpan atau tercatat di log; biaya dan kuota provider menjadi tanggung jawab pengguna dan harus terlihat jelas.
+10. API dan nama model provider eksternal dapat berubah; model id harus bisa dikonfigurasi tanpa rilis ulang.
+11. Lisensi llama.cpp, binding Flutter, dan model (mis. Qwen3) wajib dicek sebelum rilis.
 
 ---
 
-**Prioritas pengembangan:** Game bergerak dan meeting berfungsi → analisis file akurat → integrasi LLM lokal → laporan → optimasi.  
+**Prioritas pengembangan:** Game bergerak dan meeting berfungsi → spike Flutter + LLM embedded → analisis file akurat → integrasi LLM lokal → provider API key → laporan → optimasi.  
 **Definisi sukses:** pengguna dapat memainkan simulasi kantor AI di HP, memberikan misi berbasis file, menyaksikan robot menjalankan workflow dan meeting, lalu memperoleh laporan yang dapat diverifikasi.

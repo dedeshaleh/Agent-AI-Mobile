@@ -1,6 +1,10 @@
 # Agent AI Mobile — Agent HQ
 
-Game kantor AI 2D isometric untuk Android landscape, mengikuti PRD di repositori ini. Target perangkat: Infinix GT 20 Pro / X6871. **Versi saat ini: Fase 2, impor CSV/XLSX dan analisis lokal.**
+Game kantor AI isometric untuk Android landscape, mengikuti PRD di repositori ini. Target perangkat: Infinix GT 20 Pro / X6871.
+
+**Versi saat ini (PRD v1.2): aplikasi Flutter di `app/` dengan game Unity 6.3 tertanam (`unity/`), LLM lokal llama.cpp di dalam APK, dan provider AI tambahan via API key.** Lihat [docs/FLUTTER_UNITY.md](docs/FLUTTER_UNITY.md) dan [docs/AI_PROVIDERS.md](docs/AI_PROVIDERS.md). Bagian di bawah ini mendeskripsikan prototipe Godot (`game/`) yang kini menjadi referensi Fase 1–2.
+
+---
 
 ![Screenshot viewport game yang berjalan di laptop](docs/preview.png)
 

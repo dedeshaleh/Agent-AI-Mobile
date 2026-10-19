@@ -1,0 +1,9 @@
+<!-- Everything in the office is created at runtime (CreatePrimitive, TextMesh, runtime materials),
+     so nothing in the scene references these modules and the linker would strip them. -->
+<linker>
+  <assembly fullname="UnityEngine.PhysicsModule" preserve="all" />
+  <assembly fullname="UnityEngine.TextRenderingModule" preserve="all" />
+  <assembly fullname="UnityEngine.CoreModule" preserve="all" />
+  <assembly fullname="Unity.RenderPipelines.Universal.Runtime" preserve="all" />
+  <assembly fullname="AgentHQ.Runtime" preserve="all" />
+</linker>

@@ -1,0 +1,185 @@
+/// `dart:ffi` binding ke shim C `libagenthq_llama.so`
+/// (`android/app/src/main/cpp/agenthq_llama.h`).
+///
+/// Semua fungsi bersifat blocking dan hanya boleh dipanggil dari Isolate
+/// pekerja (`LlamaFfiEngine`), bukan dari UI isolate.
+library;
+
+import 'dart:ffi';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:ffi/ffi.dart';
+
+/// Kesalahan dari lapisan native; [message] diambil dari `agenthq_last_error`.
+class LlamaNativeException implements Exception {
+  const LlamaNativeException(this.code, this.message);
+  final int code;
+  final String message;
+  @override
+  String toString() => 'LlamaNativeException($code): $message';
+}
+
+/// Antarmuka polling ke runtime llama.cpp. Diabstraksikan supaya engine dapat
+/// diuji dengan implementasi palsu tanpa kode native.
+abstract class LlamaNativeApi {
+  /// Memuat model; melempar [LlamaNativeException] bila gagal.
+  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch});
+
+  void unload();
+
+  bool get isLoaded;
+
+  /// Menyiapkan satu sesi generate (reset KV, decode prompt, siapkan sampler).
+  void start(
+    String prompt, {
+    required int maxTokens,
+    required double temperature,
+    required double topP,
+    required double minP,
+    String? grammar,
+  });
+
+  /// Byte UTF-8 dari satu token berikutnya (bisa berupa potongan UTF-8 yang
+  /// belum lengkap). `null` bila generate selesai.
+  Uint8List? next();
+
+  /// Menghentikan loop [next] pada panggilan berikutnya.
+  void stop();
+
+  String lastError();
+
+  /// Kunci: `load_ms`, `prompt_tokens_per_s`, `gen_tokens_per_s`,
+  /// `prompt_tokens`, `gen_tokens`.
+  Map<String, Object?> stats();
+}
+
+typedef _LoadC = Int32 Function(Pointer<Utf8>, Int32, Int32, Int32);
+typedef _LoadD = int Function(Pointer<Utf8>, int, int, int);
+typedef _VoidC = Void Function();
+typedef _VoidD = void Function();
+typedef _IntC = Int32 Function();
+typedef _IntD = int Function();
+typedef _StartC = Int32 Function(Pointer<Utf8>, Int32, Float, Float, Float, Pointer<Utf8>);
+typedef _StartD = int Function(Pointer<Utf8>, int, double, double, double, Pointer<Utf8>);
+typedef _NextC = Int32 Function(Pointer<Uint8>, Int32);
+typedef _NextD = int Function(Pointer<Uint8>, int);
+typedef _LastErrorC = Pointer<Utf8> Function();
+typedef _LastErrorD = Pointer<Utf8> Function();
+typedef _StatsC = Int32 Function(
+    Pointer<Double>, Pointer<Double>, Pointer<Double>, Pointer<Int32>, Pointer<Int32>);
+typedef _StatsD = int Function(
+    Pointer<Double>, Pointer<Double>, Pointer<Double>, Pointer<Int32>, Pointer<Int32>);
+
+/// Implementasi nyata di atas `libagenthq_llama.so`.
+class LlamaNative implements LlamaNativeApi {
+  LlamaNative._(DynamicLibrary lib)
+      : _load = lib.lookupFunction<_LoadC, _LoadD>('agenthq_load'),
+        _unload = lib.lookupFunction<_VoidC, _VoidD>('agenthq_unload'),
+        _isLoaded = lib.lookupFunction<_IntC, _IntD>('agenthq_is_loaded'),
+        _start = lib.lookupFunction<_StartC, _StartD>('agenthq_start'),
+        _next = lib.lookupFunction<_NextC, _NextD>('agenthq_next'),
+        _stop = lib.lookupFunction<_VoidC, _VoidD>('agenthq_stop'),
+        _lastError = lib.lookupFunction<_LastErrorC, _LastErrorD>('agenthq_last_error'),
+        _stats = lib.lookupFunction<_StatsC, _StatsD>('agenthq_stats'),
+        _pieceBuf = calloc<Uint8>(_pieceCap);
+
+  factory LlamaNative.open() => LlamaNative._(openLibrary());
+
+  static const libraryName = 'libagenthq_llama.so';
+
+  /// Potongan satu token jauh lebih kecil dari ini; shim C mengembalikan
+  /// error (bukan memotong) bila tidak muat.
+  static const _pieceCap = 1024;
+
+  static DynamicLibrary openLibrary() {
+    if (Platform.isAndroid || Platform.isLinux) return DynamicLibrary.open(libraryName);
+    throw UnsupportedError('libagenthq_llama hanya tersedia di Android');
+  }
+
+  final _LoadD _load;
+  final _VoidD _unload;
+  final _IntD _isLoaded;
+  final _StartD _start;
+  final _NextD _next;
+  final _VoidD _stop;
+  final _LastErrorD _lastError;
+  final _StatsD _stats;
+  final Pointer<Uint8> _pieceBuf;
+
+  @override
+  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch}) {
+    final path = modelPath.toNativeUtf8();
+    try {
+      _check(_load(path, nCtx, nThreads, nBatch));
+    } finally {
+      calloc.free(path);
+    }
+  }
+
+  @override
+  void unload() => _unload();
+
+  @override
+  bool get isLoaded => _isLoaded() != 0;
+
+  @override
+  void start(
+    String prompt, {
+    required int maxTokens,
+    required double temperature,
+    required double topP,
+    required double minP,
+    String? grammar,
+  }) {
+    final p = prompt.toNativeUtf8();
+    final g = grammar == null ? nullptr : grammar.toNativeUtf8();
+    try {
+      _check(_start(p, maxTokens, temperature, topP, minP, g));
+    } finally {
+      calloc.free(p);
+      if (g != nullptr) calloc.free(g);
+    }
+  }
+
+  @override
+  Uint8List? next() {
+    final n = _next(_pieceBuf, _pieceCap);
+    if (n == 0) return null;
+    if (n < 0) throw LlamaNativeException(n, lastError());
+    return Uint8List.fromList(_pieceBuf.asTypedList(n));
+  }
+
+  @override
+  void stop() => _stop();
+
+  @override
+  String lastError() {
+    final p = _lastError();
+    return p == nullptr ? '' : p.toDartString();
+  }
+
+  @override
+  Map<String, Object?> stats() {
+    final d = calloc<Double>(3);
+    final i = calloc<Int32>(2);
+    try {
+      final rc = _stats(d, d + 1, d + 2, i, i + 1);
+      if (rc != 0) return const {};
+      return {
+        'load_ms': d[0],
+        'prompt_tokens_per_s': d[1],
+        'gen_tokens_per_s': d[2],
+        'prompt_tokens': i[0],
+        'gen_tokens': i[1],
+      };
+    } finally {
+      calloc.free(d);
+      calloc.free(i);
+    }
+  }
+
+  void _check(int rc) {
+    if (rc != 0) throw LlamaNativeException(rc, lastError());
+  }
+}
