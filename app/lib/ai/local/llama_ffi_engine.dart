@@ -9,6 +9,8 @@ import 'dart:convert';
 import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
+
 import 'llama_bindings.dart';
 import 'local_engine.dart';
 
@@ -45,6 +47,17 @@ class LlamaFfiEngine implements LocalEngine {
   final String? cacheDir;
   final int _flushIntervalMs;
   final int _flushBytes;
+
+  @override
+  final ValueNotifier<GenerationProgress?> progress = ValueNotifier<GenerationProgress?>(null);
+  final _genClock = Stopwatch();
+  Timer? _progressTicker;
+
+  void _clearProgress() {
+    _progressTicker?.cancel();
+    _progressTicker = null;
+    progress.value = null;
+  }
 
   LocalEngineState _state = LocalEngineState.unloaded;
   // sync: listeners observe transitions in order, before the generate stream closes.
@@ -152,6 +165,17 @@ class LlamaFfiEngine implements LocalEngine {
     final controller = StreamController<String>();
     final active = _ActiveGeneration(id, controller);
     _active = active;
+    _genClock
+      ..reset()
+      ..start();
+    progress.value = GenerationProgress(phase: GenerationPhase.prompt, tokens: 0, elapsed: Duration.zero);
+    // The worker only reports on new tokens; keep the elapsed time ticking while
+    // the prompt is being decoded (or the model is slow).
+    _progressTicker?.cancel();
+    _progressTicker = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      final p = progress.value;
+      if (p != null) progress.value = GenerationProgress(phase: p.phase, tokens: p.tokens, elapsed: _genClock.elapsed);
+    });
     _setState(LocalEngineState.generating);
 
     controller.onCancel = () {
@@ -171,8 +195,12 @@ class LlamaFfiEngine implements LocalEngine {
       flushBytes: _flushBytes,
     )).then((reply) {
       _lastStats = reply.stats ?? _lastStats;
+      _clearProgress();
       _finishGeneration(active, null);
-    }, onError: (Object e) => _finishGeneration(active, _wrap(e)));
+    }, onError: (Object e) {
+      _clearProgress();
+      _finishGeneration(active, _wrap(e));
+    });
 
     return controller.stream;
   }
@@ -194,6 +222,7 @@ class LlamaFfiEngine implements LocalEngine {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _clearProgress();
     final active = _active;
     if (active != null) _finishGeneration(active, const LocalEngineException('Engine ditutup'));
     _failPending(const LocalEngineException('Engine ditutup'));
@@ -232,6 +261,16 @@ class LlamaFfiEngine implements LocalEngine {
         final active = _active;
         if (active != null && active.id == msg.id && !active.controller.isClosed) {
           active.controller.add(msg.text);
+        }
+      } else if (msg is _Progress) {
+        final active = _active;
+        if (active != null && active.id == msg.id) {
+          if (msg.prompt) _genClock.reset();
+          progress.value = GenerationProgress(
+            phase: msg.prompt ? GenerationPhase.prompt : GenerationPhase.generating,
+            tokens: msg.tokens,
+            elapsed: _genClock.elapsed,
+          );
         }
       } else if (msg is _Reply) {
         _pending.remove(msg.id)?.complete(msg);
@@ -385,6 +424,15 @@ class _Reply {
   final Map<String, Object?>? stats;
 }
 
+/// Kemajuan generate dari worker: jumlah piece (≈ token) yang sudah dibaca;
+/// `prompt == true` dikirim tepat sebelum prompt diproses.
+class _Progress {
+  const _Progress(this.id, this.tokens, {this.prompt = false});
+  final int id;
+  final int tokens;
+  final bool prompt;
+}
+
 class _Chunk {
   const _Chunk(this.id, this.text);
   final int id;
@@ -480,6 +528,7 @@ class _Worker {
     _generating = id;
     _cancelRequested = false;
     try {
+      out.send(_Progress(id, 0, prompt: true));
       api.start(
         c.prompt,
         maxTokens: c.maxTokens,
@@ -505,6 +554,8 @@ class _Worker {
     final holdBack = stop.isEmpty ? 0 : stop.map((s) => s.length).reduce((a, b) => a > b ? a : b) - 1;
     final clock = Stopwatch()..start();
     var lastFlush = 0;
+    var lastProgress = -1000;
+    var tokens = 0;
     var emitted = 0; // chars of [text] already sent
 
     void flush({required bool force}) {
@@ -523,6 +574,13 @@ class _Worker {
       while (!_cancelRequested) {
         final piece = api.next();
         if (piece == null) break;
+        tokens++;
+        // Progress at most every 250 ms (and on the very first token so the UI
+        // switches from "memproses prompt" to "menghasilkan" immediately).
+        if (tokens == 1 || clock.elapsedMilliseconds - lastProgress >= 250) {
+          out.send(_Progress(id, tokens));
+          lastProgress = clock.elapsedMilliseconds;
+        }
         bytes.add(piece);
         final buffered = bytes.toBytes();
         final complete = completeUtf8Length(buffered);

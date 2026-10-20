@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:agent_hq/ai/local/local_engine.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -26,6 +27,9 @@ class FakeLocalEngine implements LocalEngine {
 
   @override
   Stream<LocalEngineState> get stateChanges => _changes.stream;
+
+  @override
+  final ValueNotifier<GenerationProgress?> progress = ValueNotifier<GenerationProgress?>(null);
 
   int lastGpuLayers = 0;
   LocalGpuBackend lastBackend = LocalGpuBackend.cpu;

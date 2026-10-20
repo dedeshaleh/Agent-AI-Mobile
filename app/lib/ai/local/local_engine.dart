@@ -5,7 +5,30 @@
 /// memblokir pada FFI.
 library;
 
+import 'package:flutter/foundation.dart';
+
 enum LocalEngineState { unloaded, loading, ready, generating, error }
+
+enum GenerationPhase { prompt, generating }
+
+/// Kemajuan generate yang sedang berjalan, untuk indikator di UI.
+class GenerationProgress {
+  const GenerationProgress({required this.phase, required this.tokens, required this.elapsed});
+  final GenerationPhase phase;
+
+  /// Token yang sudah dihasilkan (0 selama prompt diproses).
+  final int tokens;
+  final Duration elapsed;
+
+  double get tokensPerSecond => elapsed.inMilliseconds <= 0 ? 0 : tokens * 1000 / elapsed.inMilliseconds;
+
+  String get elapsedLabel => '${(elapsed.inMilliseconds / 1000).toStringAsFixed(1).replaceAll('.', ',')} s';
+
+  /// Mis. "Memproses prompt… ⏱ 2,1 s" atau "42 token · 7,3 tok/s · ⏱ 6,0 s".
+  String get label => phase == GenerationPhase.prompt
+      ? 'Memproses prompt… ⏱ $elapsedLabel'
+      : '$tokens token · ${tokensPerSecond.toStringAsFixed(1).replaceAll('.', ',')} tok/s · ⏱ $elapsedLabel';
+}
 
 /// Backend inferensi lokal. Nilai [nativeCode] = `enum agenthq_backend` di
 /// `agenthq_llama.h` (0 = CPU, 1 = Vulkan, 2 = OpenCL).
@@ -204,6 +227,11 @@ abstract class LocalEngine {
   LocalEngineState get state;
   Stream<LocalEngineState> get stateChanges;
   LocalModelInfo? get loadedModel;
+
+  /// Kemajuan generate yang sedang berjalan; null saat idle. Implementasi tanpa
+  /// pelaporan kemajuan memakai nilai bawaan (selalu null).
+  ValueListenable<GenerationProgress?> get progress => _noProgress;
+  static final _noProgress = ValueNotifier<GenerationProgress?>(null);
 
   /// Memuat satu model. Model yang sedang dimuat akan di-unload dulu.
   /// [gpuLayers]: 0 = CPU saja (default), N = N layer ke GPU [backend],

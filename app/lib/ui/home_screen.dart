@@ -526,7 +526,13 @@ class _StreamingChip extends StatelessWidget {
             const SizedBox(width: 8),
             Text('${controller.profiles.of(role).displayName} menyusun jawaban…', style: TextStyle(fontSize: 11, color: role.color, fontWeight: FontWeight.w700)),
             const SizedBox(width: 8),
-            Text('⏱ ${secs.toStringAsFixed(1).replaceAll('.', ',')} s', style: const TextStyle(fontSize: 11, color: HqColors.muted, fontFamily: 'monospace')),
+            ValueListenableBuilder<GenerationProgress?>(
+              valueListenable: controller.engine.progress,
+              builder: (context, p, _) => Text(
+                p != null ? p.label : '⏱ ${secs.toStringAsFixed(1).replaceAll('.', ',')} s',
+                style: const TextStyle(fontSize: 11, color: HqColors.muted, fontFamily: 'monospace'),
+              ),
+            ),
             const SizedBox(width: 4),
             const Icon(Icons.chat_bubble_outline, size: 13, color: HqColors.muted),
           ],
@@ -932,9 +938,21 @@ class _StreamingRow extends StatelessWidget {
           const SizedBox(width: 44),
           SizedBox(width: 62, child: Text(controller.profiles.of(role).displayName, style: TextStyle(color: role.color, fontWeight: FontWeight.w600, fontSize: 12), overflow: TextOverflow.ellipsis)),
           Expanded(
-            child: Text(
-              m.streaming.isEmpty ? 'menyusun jawaban… ⏱ ${secs.toStringAsFixed(1).replaceAll('.', ',')} s' : '${m.streaming} ▍',
-              style: TextStyle(fontSize: 12.5, color: m.streaming.isEmpty ? HqColors.muted : HqColors.text, fontStyle: m.streaming.isEmpty ? FontStyle.italic : FontStyle.normal),
+            child: ValueListenableBuilder<GenerationProgress?>(
+              valueListenable: controller.engine.progress,
+              builder: (context, p, _) {
+                final status = p?.label ?? '⏱ ${secs.toStringAsFixed(1).replaceAll('.', ',')} s';
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      m.streaming.isEmpty ? 'menyusun jawaban…' : '${m.streaming} ▍',
+                      style: TextStyle(fontSize: 12.5, color: m.streaming.isEmpty ? HqColors.muted : HqColors.text, fontStyle: m.streaming.isEmpty ? FontStyle.italic : FontStyle.normal),
+                    ),
+                    Text(status, style: const TextStyle(fontSize: 10, color: HqColors.muted, fontFamily: 'monospace')),
+                  ],
+                );
+              },
             ),
           ),
         ],

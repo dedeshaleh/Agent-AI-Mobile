@@ -261,6 +261,24 @@ class _ModelManagerScreenState extends State<ModelManagerScreen> {
                         ],
                       ),
                       _autoTuneTable(),
+                      if (_benchmarking || c.autoTuning || state == LocalEngineState.generating)
+                        ValueListenableBuilder<GenerationProgress?>(
+                          valueListenable: c.engine.progress,
+                          builder: (context, p, _) => Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  p == null ? 'Menyiapkan…' : p.label,
+                                  style: const TextStyle(fontSize: 12, color: HqColors.text, fontFamily: 'monospace'),
+                                ),
+                                const SizedBox(height: 4),
+                                const LinearProgressIndicator(minHeight: 3),
+                              ],
+                            ),
+                          ),
+                        ),
                       if (_benchmark != null) ...[
                         const SizedBox(height: 8),
                         Container(
