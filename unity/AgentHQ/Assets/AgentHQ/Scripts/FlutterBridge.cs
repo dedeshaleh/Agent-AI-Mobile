@@ -32,14 +32,33 @@ public class FlutterBridge : MonoBehaviour
     [Serializable] class RoomTappedMessage { public string type = "roomTapped"; public int room; }
     [Serializable] class MeetingSeatedMessage { public string type = "meetingSeated"; }
     [Serializable] class ErrorMessage { public string type = "error"; public string message; }
+    [Serializable] class StatsMessage { public string type = "stats"; public float fps; public float frameMs; public string gpu; }
 
     OfficeDirector director;
     CameraRig cameraRig;
+    int statFrames;
+    float statElapsed;
 
     void Start()
     {
         Bind();
         Send(new ReadyMessage());
+    }
+
+    // Once per second: render FPS and frame time for the Flutter performance overlay.
+    void Update()
+    {
+        statFrames++;
+        statElapsed += Time.unscaledDeltaTime;
+        if (statElapsed < 1f) return;
+        Send(new StatsMessage
+        {
+            fps = statFrames / statElapsed,
+            frameMs = statElapsed / statFrames * 1000f,
+            gpu = SystemInfo.graphicsDeviceName,
+        });
+        statFrames = 0;
+        statElapsed = 0f;
     }
 
     void Bind()

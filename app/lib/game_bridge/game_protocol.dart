@@ -23,6 +23,7 @@
 /// {"type":"agentTapped","agent":0}
 /// {"type":"roomTapped","room":1}
 /// {"type":"meetingSeated"}                            // keempat robot sudah duduk
+/// {"type":"stats","fps":29.8,"frameMs":33.5,"gpu":"Mali-G610"}   // tiap detik
 /// {"type":"error","message":"..."}
 /// ```
 library;
@@ -123,6 +124,12 @@ sealed class GameEvent {
         return RoomTapped(OfficeRoom.fromIndex(intOf('room')));
       case 'meetingSeated':
         return const MeetingSeated();
+      case 'stats':
+        return GameStats(
+          fps: (map['fps'] as num?)?.toDouble() ?? 0,
+          frameMs: (map['frameMs'] as num?)?.toDouble() ?? 0,
+          gpu: map['gpu'] as String?,
+        );
       case 'error':
         return GameError((parsed['message'] as String?) ?? 'Kesalahan Unity');
       default:
@@ -156,6 +163,13 @@ class RoomTapped extends GameEvent {
 
 class MeetingSeated extends GameEvent {
   const MeetingSeated();
+}
+
+class GameStats extends GameEvent {
+  const GameStats({required this.fps, required this.frameMs, this.gpu});
+  final double fps;
+  final double frameMs;
+  final String? gpu;
 }
 
 class GameError extends GameEvent {

@@ -8,6 +8,9 @@ import '../ai/ai_router.dart';
 import '../data/analysis_result.dart';
 import '../data/data_advisor.dart';
 import '../game_bridge/game_protocol.dart';
+import '../perf/perf_monitor.dart';
+import 'agent_chat.dart';
+import 'agent_profile.dart';
 import 'agent_role.dart';
 
 enum MissionPhase { idle, dataPrep, analysis, strategy, meeting, report, done, failed }
@@ -19,6 +22,8 @@ class AgentStatus {
     this.roomIndex = -1,
     this.history = const [],
     this.providerId,
+    this.lastDurationMs,
+    this.lastTokensPerSecond,
   });
   final AgentState state;
   final String activity;
@@ -28,7 +33,25 @@ class AgentStatus {
   /// Provider yang menjawab giliran terakhir agent ini (null = template).
   final String? providerId;
 
-  AgentStatus copyWith({AgentState? state, String? activity, int? roomIndex, String? providerId}) {
+  /// Lama proses jawaban model terakhir dan kecepatannya.
+  final int? lastDurationMs;
+  final double? lastTokensPerSecond;
+
+  String? get lastTimingLabel {
+    if (lastDurationMs == null) return null;
+    final secs = (lastDurationMs! / 1000).toStringAsFixed(1).replaceAll('.', ',');
+    final tps = lastTokensPerSecond;
+    return tps == null || tps <= 0 ? '⏱ $secs s' : '⏱ $secs s · ${tps.toStringAsFixed(0)} tok/s';
+  }
+
+  AgentStatus copyWith({
+    AgentState? state,
+    String? activity,
+    int? roomIndex,
+    String? providerId,
+    int? lastDurationMs,
+    double? lastTokensPerSecond,
+  }) {
     final next = activity ?? this.activity;
     return AgentStatus(
       state: state ?? this.state,
@@ -36,6 +59,8 @@ class AgentStatus {
       roomIndex: roomIndex ?? this.roomIndex,
       history: activity == null ? history : [...history.take(15), next],
       providerId: providerId ?? this.providerId,
+      lastDurationMs: lastDurationMs ?? this.lastDurationMs,
+      lastTokensPerSecond: lastTokensPerSecond ?? this.lastTokensPerSecond,
     );
   }
 }
@@ -93,13 +118,18 @@ class MissionRecord {
 /// Menjalankan satu misi end-to-end (PRD §4) dan mengarahkan robot di game.
 /// Semua angka berasal dari [AnalysisResult]; LLM hanya merangkai narasi.
 class MissionOrchestrator extends ChangeNotifier {
-  MissionOrchestrator({required this.game, required this.ai, this.onPersist}) {
+  MissionOrchestrator({required this.game, required this.ai, required this.profiles, this.perf, this.onPersist}) {
     _sub = game.events.listen(_onGameEvent);
   }
 
   final GameBridge game;
   final AiRouter ai;
+  final AgentProfileStore profiles;
+  final PerfMonitor? perf;
   final Future<void> Function(MissionRecord record)? onPersist;
+
+  /// Dipasang UI: tap robot di game → buka chat dengan target agent itu.
+  void Function(AgentRole role)? onAgentTapped;
   late final StreamSubscription<GameEvent> _sub;
 
   MissionPhase phase = MissionPhase.idle;
@@ -119,15 +149,222 @@ class MissionOrchestrator extends ChangeNotifier {
   /// Teks yang sedang di-stream dari model (untuk bubble langsung).
   String streaming = '';
   AgentRole? streamingAgent;
+  DateTime? streamingStartedAt;
+
+  /// Percakapan pengguna ⇄ agent, termasuk baris sistem (log) dan transkrip meeting.
+  final chat = <ChatMessage>[];
+
+  /// Perintah pengguna sedang diproses oleh satu/beberapa agent.
+  bool commanding = false;
 
   final _arrivals = <AgentRole, Completer<void>>{};
   Completer<void>? _seated;
   Completer<void>? _resume;
   CancelToken? _cancel;
   bool _cancelled = false;
+  bool _greeted = false;
+  final _speechTimers = <AgentRole, Timer>{};
 
-  bool get busy => phase != MissionPhase.idle && phase != MissionPhase.done && phase != MissionPhase.failed;
+  bool get missionRunning => phase != MissionPhase.idle && phase != MissionPhase.done && phase != MissionPhase.failed;
+  bool get busy => missionRunning || commanding;
   bool get hasTranscript => transcript.isNotEmpty;
+
+  // ---------------------------------------------------------------- greeting & commands
+
+  /// Keempat robot menyapa sesuai jam saat kantor pertama kali siap.
+  Future<void> greet() async {
+    if (_greeted) return;
+    _greeted = true;
+    final greeting = greetingForHour(DateTime.now().hour);
+    String line(AgentRole role) {
+      final p = profiles.of(role);
+      final santai = p.tone == AgentTone.santai;
+      final me = santai ? 'Aku ${p.displayName}' : 'Saya ${p.displayName}';
+      return switch (role) {
+        AgentRole.data => '$greeting! $me. Kirim CSV/Excel, ${santai ? 'aku' : 'saya'} validasi dulu.',
+        AgentRole.analyst => '$greeting! $me. KPI ${santai ? 'kuhitung' : 'saya hitung'} dengan kode, bukan tebakan.',
+        AgentRole.strategist => '$greeting! $me, siap menafsirkan angka jadi rekomendasi.',
+        AgentRole.reporter => '$greeting! $me, siap menyusun notulen dan laporan.',
+      };
+    }
+
+    for (final role in AgentRole.values.where((r) => profiles.of(r).greets)) {
+      _say(role, line(role), source: null, hold: const Duration(seconds: 6));
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+    }
+  }
+
+  /// Perintah pengguna ke satu agent atau seluruh tim. Agent boleh
+  /// mendelegasikan ke rekan (satu tingkat) lewat JSON `delegate`.
+  Future<void> command(ChatTarget target, String text) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty || busy) return;
+    commanding = true;
+    _cancelled = false;
+    _cancel = CancelToken();
+    chat.add(ChatMessage.user(trimmed, target: target));
+    notifyListeners();
+    try {
+      final roles = target.isTeam ? AgentRole.values.where((r) => profiles.of(r).joinsTeam).toList() : [target.role!];
+      if (roles.isEmpty) _log('Tidak ada agent yang diatur untuk menjawab perintah tim.');
+      for (final role in roles) {
+        _checkCancelled();
+        await _respond(role, trimmed, fromUser: true, allowDelegate: true);
+      }
+    } catch (e) {
+      if (!_cancelled) _log('Perintah gagal: ${_short('$e')}');
+    } finally {
+      commanding = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _respond(AgentRole role, String instruction, {required bool fromUser, required bool allowDelegate}) async {
+    await _gate();
+    final profile = profiles.of(role);
+    final mayDelegate = allowDelegate && profile.canDelegate;
+    _set(role, state: AgentState.waitingLlm, activity: fromUser ? 'Menjawab perintah pengguna' : 'Mengerjakan tugas dari rekan');
+    game.send(SetState(role, AgentState.waitingLlm));
+    _beginStreaming(role);
+
+    final facts = data?.ok == true ? 'Fakta agregat dataset (dihitung kode): ${jsonEncode(data!.toFacts())}' : 'Belum ada dataset yang dianalisis.';
+    final peers = AgentRole.values.where((r) => r != role && profiles.of(r).acceptsDelegation).toList();
+    final roster = peers.map((r) => '${r.title} (${r.duty})').join(', ');
+    final system = 'Kamu agent "${profile.displayName}" (peran ${role.title}) di kantor AI Agent HQ; tugasmu: ${role.duty}. '
+        '${peers.isEmpty ? 'Tidak ada rekan yang bisa menerima tugas.' : 'Rekan tim: $roster.'} '
+        'Jawab dalam bahasa Indonesia. ${profile.styleInstruction} '
+        'Spesifik, tanpa mengarang angka atau kolom yang tidak ada di fakta. '
+        '${mayDelegate && peers.isNotEmpty ? 'Jika sebagian tugas lebih cocok untuk rekan, delegasikan lewat "delegate" (maksimal 2 rekan, pakai nama peran, tugas singkat dan jelas); jika tidak, kosongkan.' : 'Jangan mendelegasikan; "delegate" harus [].'} '
+        'Balas HANYA JSON valid: {"reply": "...", "delegate": [{"agent": "<nama peran rekan>", "task": "..."}]}';
+    final request = AiRequest(
+      messages: [AiMessage.system(system), AiMessage.user('$facts\n\n${fromUser ? 'Perintah pengguna' : 'Instruksi'}: $instruction')],
+      maxTokens: profile.maxTokens + 60,
+      temperature: profile.temperature,
+    );
+
+    String reply;
+    String? source;
+    var delegates = const <({AgentRole agent, String task})>[];
+    final watch = Stopwatch()..start();
+    try {
+      source = ai.providerIdFor(role);
+      final buffer = StringBuffer();
+      await for (final chunk in ai.chat(role, request, cancel: _cancel, onFallback: (id, _) => source = id)) {
+        buffer.write(chunk.text);
+        streaming = buffer.toString();
+        notifyListeners();
+      }
+      final parsed = _parseCommandReply(buffer.toString(), role);
+      reply = parsed.reply;
+      if (mayDelegate) delegates = parsed.delegates.where((d) => profiles.of(d.agent).acceptsDelegation).toList();
+      if (reply.isEmpty) throw const AiProviderException('Jawaban model kosong');
+    } catch (e) {
+      if (_cancelled) rethrow;
+      source = null;
+      reply = 'Model belum tersedia, perintah ${profile.tone == AgentTone.santai ? 'kucatat' : 'saya catat'}: "$instruction". '
+          '${data?.ok == true ? 'Dataset aktif: ${data!.sourceName}, ${data!.rows} baris valid.' : 'Belum ada dataset untuk dikerjakan.'}';
+    } finally {
+      _endStreaming();
+    }
+    watch.stop();
+    final timing = _timingFor(source, watch.elapsedMilliseconds);
+
+    _say(role, reply, source: source, hold: Duration(milliseconds: (2500 + reply.length * 35).clamp(3000, 9000)), timing: timing);
+    _set(
+      role,
+      state: AgentState.working,
+      activity: fromUser ? 'Menjawab perintah pengguna' : 'Tugas dari rekan selesai',
+      providerId: source,
+      lastDurationMs: timing.durationMs,
+      lastTokensPerSecond: timing.tokensPerSecond,
+    );
+    await _delay(const Duration(milliseconds: 1200));
+
+    for (final d in delegates) {
+      _checkCancelled();
+      chat.add(ChatMessage.system('${role.title} → ${d.agent.title}: ${d.task}'));
+      _set(d.agent, state: AgentState.assigned, activity: 'Menerima tugas dari ${role.title}');
+      notifyListeners();
+      await _respond(d.agent, 'Dari ${role.title}: ${d.task}', fromUser: false, allowDelegate: false);
+    }
+    _set(role, state: AgentState.idle, activity: 'Siap menerima perintah');
+  }
+
+  ({String reply, List<({AgentRole agent, String task})> delegates}) _parseCommandReply(String raw, AgentRole self) {
+    final text = raw.trim();
+    final start = text.indexOf('{');
+    final end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        final map = jsonDecode(text.substring(start, end + 1)) as Map<String, Object?>;
+        final reply = (map['reply'] as String?)?.trim() ?? '';
+        final delegates = <({AgentRole agent, String task})>[];
+        for (final item in (map['delegate'] as List? ?? const []).take(2)) {
+          if (item is! Map) continue;
+          final name = (item['agent'] as String? ?? '').toLowerCase();
+          final task = (item['task'] as String? ?? '').trim();
+          final role = AgentRole.values.where((r) => r.title.toLowerCase() == name).firstOrNull;
+          if (role == null || role == self || task.isEmpty) continue;
+          delegates.add((agent: role, task: task));
+        }
+        return (reply: reply, delegates: delegates);
+      } on FormatException {
+        // Jatuh ke teks mentah di bawah.
+      } on TypeError {
+        // Bentuk JSON tidak sesuai; pakai teks mentah.
+      }
+    }
+    return (reply: text.replaceAll(RegExp(r'[{}"]'), '').trim(), delegates: const []);
+  }
+
+  void _beginStreaming(AgentRole role) {
+    streaming = '';
+    streamingAgent = role;
+    streamingStartedAt = DateTime.now();
+    notifyListeners();
+  }
+
+  void _endStreaming() {
+    streaming = '';
+    streamingAgent = null;
+    streamingStartedAt = null;
+  }
+
+  /// Durasi + tokens/s (hanya tersedia untuk model lokal lewat statistik llama.cpp).
+  ({int durationMs, double? tokensPerSecond}) _timingFor(String? source, int elapsedMs) {
+    double? tps;
+    if (source == ProviderConfig.localId) {
+      final stats = ai.localEngine.lastStats;
+      for (final key in const ['gen_tokens_per_s', 'generation_tokens_per_second', 'tokens_per_second', 'output_tokens_per_s']) {
+        final v = stats[key];
+        if (v is num && v > 0) {
+          tps = v.toDouble();
+          break;
+        }
+      }
+      if (tps != null) perf?.updateTokensPerSecond(tps);
+    }
+    return (durationMs: elapsedMs, tokensPerSecond: tps);
+  }
+
+  /// Bubble bicara di game + pesan chat; bubble dihapus setelah [hold].
+  void _say(
+    AgentRole role,
+    String text, {
+    required String? source,
+    required Duration hold,
+    ({int durationMs, double? tokensPerSecond})? timing,
+  }) {
+    chat.add(ChatMessage.agent(role, text, source: source, durationMs: timing?.durationMs, tokensPerSecond: timing?.tokensPerSecond));
+    game.send(SetState(role, AgentState.talking));
+    game.send(Speak(role, text));
+    _speechTimers[role]?.cancel();
+    _speechTimers[role] = Timer(hold, () {
+      game.send(Speak(role, ''));
+      if (agents[role]!.state == AgentState.talking) game.send(SetState(role, agents[role]!.state));
+    });
+    notifyListeners();
+  }
 
   // ---------------------------------------------------------------- controls
 
@@ -324,7 +561,7 @@ class MissionOrchestrator extends ChangeNotifier {
       game.send(SetState(line.agent, AgentState.talking));
       game.send(Speak(line.agent, line.text));
       transcript.add(line);
-      _log('${line.agent.title}: ${line.text}');
+      chat.add(ChatMessage.agent(line.agent, line.text, source: line.source));
       notifyListeners();
       final words = line.text.split(RegExp(r'\s+')).length;
       await _delay(Duration(milliseconds: (2500 + words * 180).clamp(3000, 9000)));
@@ -355,15 +592,15 @@ class MissionOrchestrator extends ChangeNotifier {
     await _gate();
     _set(role, state: AgentState.waitingLlm, activity: 'Menunggu jawaban model');
     game.send(SetState(role, AgentState.waitingLlm));
-    streaming = '';
-    streamingAgent = role;
-    notifyListeners();
+    _beginStreaming(role);
+    final profile = profiles.of(role);
     final request = AiRequest(
-      messages: [AiMessage.system(system), AiMessage.user(user)],
+      messages: [AiMessage.system('$system ${profile.styleInstruction}'), AiMessage.user(user)],
       maxTokens: maxTokens,
-      temperature: 0.3,
+      temperature: profile.temperature,
     );
     String? source;
+    final watch = Stopwatch()..start();
     try {
       source = ai.providerIdFor(role);
       final buffer = StringBuffer();
@@ -385,7 +622,16 @@ class MissionOrchestrator extends ChangeNotifier {
       }
       final text = buffer.toString().trim();
       if (text.isEmpty) throw const AiProviderException('Jawaban model kosong');
-      _set(role, state: AgentState.working, activity: 'Jawaban model diterima', providerId: source);
+      watch.stop();
+      final timing = _timingFor(source, watch.elapsedMilliseconds);
+      _set(
+        role,
+        state: AgentState.working,
+        activity: 'Jawaban model diterima (${(timing.durationMs / 1000).toStringAsFixed(1)} s)',
+        providerId: source,
+        lastDurationMs: timing.durationMs,
+        lastTokensPerSecond: timing.tokensPerSecond,
+      );
       return (text: text, source: source);
     } catch (e) {
       if (_cancelled) rethrow;
@@ -394,8 +640,7 @@ class MissionOrchestrator extends ChangeNotifier {
       _set(role, state: AgentState.working, activity: 'Memakai template lokal', providerId: null);
       return (text: text, source: null);
     } finally {
-      streaming = '';
-      streamingAgent = null;
+      _endStreaming();
       notifyListeners();
     }
   }
@@ -444,12 +689,16 @@ class MissionOrchestrator extends ChangeNotifier {
         if (_seated case final s? when !s.isCompleted) s.complete();
       case AgentTapped(:final agent):
         select(agent);
+        onAgentTapped?.call(agent);
+      case GameStats(:final fps, :final frameMs, :final gpu):
+        perf?.updateUnity(fps: fps, frameMs: frameMs, gpu: gpu);
       case GameError(:final message):
         _log('Unity: $message');
         notifyListeners();
       case GameReady():
         _log('Tampilan kantor siap.');
         notifyListeners();
+        if (!missionRunning) unawaited(greet());
       case RoomTapped():
         break;
     }
@@ -484,8 +733,23 @@ class MissionOrchestrator extends ChangeNotifier {
     if (_cancelled) throw const _MissionCancelled();
   }
 
-  void _set(AgentRole role, {AgentState? state, String? activity, int? roomIndex, String? providerId}) {
-    agents[role] = agents[role]!.copyWith(state: state, activity: activity, roomIndex: roomIndex, providerId: providerId);
+  void _set(
+    AgentRole role, {
+    AgentState? state,
+    String? activity,
+    int? roomIndex,
+    String? providerId,
+    int? lastDurationMs,
+    double? lastTokensPerSecond,
+  }) {
+    agents[role] = agents[role]!.copyWith(
+      state: state,
+      activity: activity,
+      roomIndex: roomIndex,
+      providerId: providerId,
+      lastDurationMs: lastDurationMs,
+      lastTokensPerSecond: lastTokensPerSecond,
+    );
     if (state != null) game.send(SetState(role, state));
     notifyListeners();
   }
@@ -523,6 +787,8 @@ class MissionOrchestrator extends ChangeNotifier {
     final now = DateTime.now();
     log.add('${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}  $message');
     if (log.length > 200) log.removeAt(0);
+    chat.add(ChatMessage.system(message));
+    if (chat.length > 400) chat.removeAt(0);
   }
 
   static String _short(String s) => s.length > 120 ? '${s.substring(0, 117)}…' : s;
@@ -530,9 +796,14 @@ class MissionOrchestrator extends ChangeNotifier {
   @override
   void dispose() {
     _sub.cancel();
+    for (final t in _speechTimers.values) {
+      t.cancel();
+    }
     super.dispose();
   }
 }
+
+void unawaited(Future<void> f) {}
 
 class _MissionCancelled implements Exception {
   const _MissionCancelled();

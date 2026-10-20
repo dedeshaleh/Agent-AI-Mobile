@@ -9,8 +9,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart' show databaseFactory;
 
+import 'agents/agent_profile.dart';
 import 'agents/agent_role.dart';
 import 'agents/mission_orchestrator.dart';
+import 'perf/perf_monitor.dart';
 import 'ai/ai_provider.dart';
 import 'ai/ai_router.dart';
 import 'ai/ai_settings.dart';
@@ -38,6 +40,15 @@ class AppController extends ChangeNotifier {
   late final ModelManager models;
   late final GameBridge game;
   late final MissionOrchestrator mission;
+  late final AgentProfileStore profiles;
+  late final PerfMonitor perf;
+
+  /// Overlay FPS/CPU/RAM di atas game; diingat antar sesi.
+  bool get showPerf => _prefs.getBool('ui.show_perf') ?? true;
+  Future<void> setShowPerf(bool v) async {
+    await _prefs.setBool('ui.show_perf', v);
+    notifyListeners();
+  }
   late final DatasetStore datasets;
   late final SharedPreferences _prefs;
   late final Directory _supportDir;
@@ -88,7 +99,10 @@ class AppController extends ChangeNotifier {
       await datasets.open();
       datasetList = await datasets.list();
       game = createGameBridge();
-      mission = MissionOrchestrator(game: game, ai: router, onPersist: _persistMission);
+      profiles = AgentProfileStore(_prefs);
+      perf = PerfMonitor();
+      mission = MissionOrchestrator(game: game, ai: router, profiles: profiles, perf: perf, onPersist: _persistMission);
+      profiles.addListener(notifyListeners);
       mission.addListener(notifyListeners);
       settingsStore.addListener(notifyListeners);
       models.addListener(notifyListeners);
