@@ -21,12 +21,15 @@ LlamaNativeApi _openNative() => LlamaNative.open();
 class LlamaFfiEngine implements LocalEngine {
   /// [createApi] memungkinkan pengujian dengan API palsu; default membuka
   /// pustaka native.
+  /// [cacheDir]: direktori privat aplikasi untuk cache binary kernel OpenCL
+  /// (`GGML_OPENCL_KERNEL_CACHE_DIR`); null = tanpa cache.
   LlamaFfiEngine({
     LlamaApiFactory createApi = _openNative,
     this.batchSize = 512,
     Duration flushInterval = const Duration(milliseconds: 60),
     this._flushBytes = 32,
     void Function()? directStop,
+    this.cacheDir,
   })  : _createApi = createApi, // ignore: prefer_initializing_formals
         _flushIntervalMs = flushInterval.inMilliseconds,
         // The worker isolate cannot read _CancelCmd while it is blocked inside a native
@@ -39,6 +42,7 @@ class LlamaFfiEngine implements LocalEngine {
   final LlamaApiFactory _createApi;
   final void Function()? _directStop;
   final int batchSize;
+  final String? cacheDir;
   final int _flushIntervalMs;
   final int _flushBytes;
 
@@ -71,18 +75,33 @@ class LlamaFfiEngine implements LocalEngine {
   Map<String, Object?> get lastStats => _lastStats;
 
   @override
-  Future<void> load(String modelPath, {int contextLength = 2048, int threads = 4, int gpuLayers = 0}) async {
+  Future<void> load(
+    String modelPath, {
+    int contextLength = 2048,
+    int threads = 4,
+    int gpuLayers = 0,
+    LocalGpuBackend backend = LocalGpuBackend.cpu,
+  }) async {
     if (_active != null) throw const LocalEngineException('Tidak bisa load saat generate berjalan');
     _setState(LocalEngineState.loading);
+    final wantGpu = gpuLayers > 0 && backend.isGpu;
     try {
-      final reply = await _send(_LoadCmd(modelPath, contextLength, threads, batchSize, gpuLayers));
+      final reply = await _send(_LoadCmd(modelPath, contextLength, threads, batchSize, wantGpu ? gpuLayers : 0,
+          wantGpu ? backend.nativeCode : 0, cacheDir));
       _lastStats = reply.stats ?? const {};
       final used = _lastStats['gpu_layers'];
+      final usedBackend = _lastStats['gpu_backend'];
+      final layers = _lastStats['model_layers'];
+      final usedLayers = used is num ? used.toInt() : (wantGpu ? gpuLayers : 0);
       _loadedModel = LocalModelInfo(
         path: modelPath,
         contextLength: contextLength,
         threads: threads,
-        gpuLayers: used is num ? used.toInt() : (gpuLayers > 0 ? gpuLayers : 0),
+        gpuLayers: usedLayers,
+        backend: usedBackend is num
+            ? LocalGpuBackend.fromNativeCode(usedBackend.toInt())
+            : (usedLayers > 0 ? backend : LocalGpuBackend.cpu),
+        layerCount: layers is num ? layers.toInt() : 0,
       );
       _setState(LocalEngineState.ready);
     } catch (e) {
@@ -93,9 +112,18 @@ class LlamaFfiEngine implements LocalEngine {
   }
 
   @override
-  Future<LocalEngineGpuInfo> gpuInfo() async {
+  Future<LocalGpuReport> gpuInfo() async {
     final reply = await _send(_GpuInfoCmd());
-    return LocalEngineGpuInfo.fromJson(reply.stats ?? const {});
+    final stats = reply.stats ?? const {};
+    LocalEngineGpuInfo parse(String key, LocalEngineGpuInfo fallback) {
+      final raw = stats[key];
+      return raw is Map ? LocalEngineGpuInfo.fromJson(raw.cast<String, Object?>()) : fallback;
+    }
+
+    return LocalGpuReport(
+      vulkan: parse('vulkan', LocalEngineGpuInfo.none),
+      opencl: parse('opencl', LocalEngineGpuInfo.noneOpenCl),
+    );
   }
 
   @override
@@ -301,12 +329,16 @@ sealed class _Cmd {
 }
 
 class _LoadCmd extends _Cmd {
-  _LoadCmd(this.path, this.nCtx, this.nThreads, this.nBatch, this.nGpuLayers);
+  _LoadCmd(this.path, this.nCtx, this.nThreads, this.nBatch, this.nGpuLayers, this.backend, this.cacheDir);
   final String path;
   final int nCtx;
   final int nThreads;
   final int nBatch;
   final int nGpuLayers;
+
+  /// `agenthq_backend` (0 cpu, 1 vulkan, 2 opencl).
+  final int backend;
+  final String? cacheDir;
 }
 
 class _UnloadCmd extends _Cmd {}
@@ -381,13 +413,24 @@ class _Worker {
 
   int? _generating;
   bool _cancelRequested = false;
+  bool _cacheDirSet = false;
 
   Future<void> handle(Object? msg) async {
     switch (msg) {
       case _LoadCmd c:
         _reply(c.id, () {
-          api.load(c.path, nCtx: c.nCtx, nThreads: c.nThreads, nBatch: c.nBatch, nGpuLayers: c.nGpuLayers);
-          return {...api.stats(), 'gpu_layers': api.gpuLayers};
+          if (!_cacheDirSet) {
+            _cacheDirSet = true;
+            api.setCacheDir(c.cacheDir);
+          }
+          api.load(c.path,
+              nCtx: c.nCtx, nThreads: c.nThreads, nBatch: c.nBatch, nGpuLayers: c.nGpuLayers, backend: c.backend);
+          return {
+            ...api.stats(),
+            'gpu_layers': api.gpuLayers,
+            'gpu_backend': api.gpuBackend,
+            'model_layers': api.modelLayers,
+          };
         });
       case _UnloadCmd c:
         _reply(c.id, () {
@@ -395,7 +438,19 @@ class _Worker {
           return null;
         });
       case _GpuInfoCmd c:
-        _reply(c.id, api.gpuInfo);
+        _reply(c.id, () {
+          // Each backend is queried separately so one failing probe does not
+          // hide the other; a throwing probe counts as "not available".
+          Map<String, Object?> probe(LocalGpuBackend b) {
+            try {
+              return api.gpuInfo(b.nativeCode);
+            } catch (e) {
+              return {'available': false, 'backend': b.name, 'reason': 'Deteksi gagal: $e'};
+            }
+          }
+
+          return {'vulkan': probe(LocalGpuBackend.vulkan), 'opencl': probe(LocalGpuBackend.opencl)};
+        });
       case _CancelCmd c:
         if (_generating == c.generationId) {
           _cancelRequested = true;

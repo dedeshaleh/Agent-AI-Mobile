@@ -28,21 +28,55 @@ class FakeLocalEngine implements LocalEngine {
   Stream<LocalEngineState> get stateChanges => _changes.stream;
 
   int lastGpuLayers = 0;
+  LocalGpuBackend lastBackend = LocalGpuBackend.cpu;
+  final loads = <(int gpuLayers, LocalGpuBackend backend)>[];
+
+  /// Jumlah layer model palsu (`n_layer`), dilaporkan lewat [loadedModel].
+  int layerCount = 0;
+
+  /// Backend GPU yang "tidak tersedia": load dengan gpuLayers > 0 pada backend
+  /// ini melempar [LocalEngineException] -11 seperti engine asli.
+  Set<LocalGpuBackend> unavailableBackends = const {};
+
+  /// tok/s yang dilaporkan di [lastStats] per gpuLayers (untuk uji auto-tune);
+  /// null → nilai tetap.
+  double Function(int gpuLayers)? tokensPerSecondFor;
+
+  LocalGpuReport gpuReport = LocalGpuReport.none;
 
   @override
   LocalModelInfo? get loadedModel => _state == LocalEngineState.unloaded
       ? null
-      : LocalModelInfo(path: '/m.gguf', contextLength: 2048, threads: 4, gpuLayers: lastGpuLayers);
+      : LocalModelInfo(
+          path: '/m.gguf',
+          contextLength: 2048,
+          threads: 4,
+          gpuLayers: lastGpuLayers,
+          backend: lastGpuLayers > 0 ? lastBackend : LocalGpuBackend.cpu,
+          layerCount: layerCount,
+        );
 
   @override
-  Future<void> load(String modelPath, {int contextLength = 2048, int threads = 4, int gpuLayers = 0}) async {
+  Future<void> load(
+    String modelPath, {
+    int contextLength = 2048,
+    int threads = 4,
+    int gpuLayers = 0,
+    LocalGpuBackend backend = LocalGpuBackend.cpu,
+  }) async {
+    loads.add((gpuLayers, backend));
+    if (gpuLayers > 0 && unavailableBackends.contains(backend)) {
+      state = LocalEngineState.error;
+      throw LocalEngineException('${backend.name}: Driver tidak ditemukan', code: LocalEngineException.gpuUnavailableCode);
+    }
     loaded = true;
-    lastGpuLayers = gpuLayers;
+    lastGpuLayers = gpuLayers > 0 && backend.isGpu ? (layerCount > 0 ? gpuLayers.clamp(0, layerCount + 1) : gpuLayers) : 0;
+    lastBackend = backend;
     state = LocalEngineState.ready;
   }
 
   @override
-  Future<LocalEngineGpuInfo> gpuInfo() async => LocalEngineGpuInfo.none;
+  Future<LocalGpuReport> gpuInfo() async => gpuReport;
 
   @override
   Future<void> unload() async => state = LocalEngineState.unloaded;
@@ -59,7 +93,12 @@ class FakeLocalEngine implements LocalEngine {
   Future<void> cancel() async => cancelCalls++;
 
   @override
-  Map<String, Object?> get lastStats => const {'prompt_tokens': 10, 'output_tokens': 5};
+  Map<String, Object?> get lastStats => {
+        'prompt_tokens': 10,
+        'output_tokens': 5,
+        if (tokensPerSecondFor != null) 'gen_tokens_per_s': tokensPerSecondFor!(lastGpuLayers),
+        'gpu_layers': lastGpuLayers,
+      };
 }
 
 /// Membuat body SSE dari daftar event (event opsional, data JSON/teks).

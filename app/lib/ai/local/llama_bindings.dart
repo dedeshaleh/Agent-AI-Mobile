@@ -25,9 +25,18 @@ class LlamaNativeException implements Exception {
 /// diuji dengan implementasi palsu tanpa kode native.
 abstract class LlamaNativeApi {
   /// Memuat model; melempar [LlamaNativeException] bila gagal.
-  /// [nGpuLayers] 0 = CPU saja; >= 99 = semua layer ke GPU (Vulkan).
-  /// Kode `-11` (`AGENTHQ_ERR_GPU_UNAVAILABLE`) berarti GPU tidak tersedia.
-  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch, int nGpuLayers = 0});
+  /// [nGpuLayers] 0 = CPU saja; >= 99 = semua layer ke GPU. [backend] =
+  /// `enum agenthq_backend` (0 cpu, 1 vulkan, 2 opencl); diabaikan bila
+  /// [nGpuLayers] 0. Kode `-11` (`AGENTHQ_ERR_GPU_UNAVAILABLE`) berarti GPU
+  /// backend itu tidak tersedia.
+  void load(
+    String modelPath, {
+    required int nCtx,
+    required int nThreads,
+    required int nBatch,
+    int nGpuLayers = 0,
+    int backend = 0,
+  });
 
   void unload();
 
@@ -36,9 +45,19 @@ abstract class LlamaNativeApi {
   /// Layer yang benar-benar di-offload ke GPU oleh model yang dimuat (0 = CPU).
   int get gpuLayers;
 
-  /// JSON `agenthq_gpu_info` yang sudah di-decode: `available`, `backend`,
-  /// `device`, `vram_mb`, `integrated`. Tidak perlu model dimuat.
-  Map<String, Object?> gpuInfo();
+  /// `agenthq_backend` yang dipakai model yang dimuat (0 bila CPU/tidak ada).
+  int get gpuBackend;
+
+  /// `n_layer` model yang dimuat (0 bila tidak ada).
+  int get modelLayers;
+
+  /// Direktori cache binary kernel OpenCL; panggil sebelum load pertama.
+  void setCacheDir(String? dir);
+
+  /// JSON `agenthq_gpu_info(backend)` yang sudah di-decode: `available`,
+  /// `backend`, `device`, `vram_mb`, `integrated`, `api_version`, `reason`.
+  /// [backend] 1 = Vulkan, 2 = OpenCL. Tidak perlu model dimuat.
+  Map<String, Object?> gpuInfo(int backend);
 
   /// Menyiapkan satu sesi generate (reset KV, decode prompt, siapkan sampler).
   void start(
@@ -60,14 +79,16 @@ abstract class LlamaNativeApi {
   String lastError();
 
   /// Kunci: `load_ms`, `prompt_tokens_per_s`, `gen_tokens_per_s`,
-  /// `prompt_tokens`, `gen_tokens`, `gpu_layers`.
+  /// `prompt_tokens`, `gen_tokens`, `gpu_layers`, `gpu_backend`, `model_layers`.
   Map<String, Object?> stats();
 }
 
-typedef _LoadC = Int32 Function(Pointer<Utf8>, Int32, Int32, Int32, Int32);
-typedef _LoadD = int Function(Pointer<Utf8>, int, int, int, int);
-typedef _GpuInfoC = Int32 Function(Pointer<Utf8>, Int32);
-typedef _GpuInfoD = int Function(Pointer<Utf8>, int);
+typedef _LoadC = Int32 Function(Pointer<Utf8>, Int32, Int32, Int32, Int32, Int32);
+typedef _LoadD = int Function(Pointer<Utf8>, int, int, int, int, int);
+typedef _GpuInfoC = Int32 Function(Int32, Pointer<Utf8>, Int32);
+typedef _GpuInfoD = int Function(int, Pointer<Utf8>, int);
+typedef _SetStrC = Void Function(Pointer<Utf8>);
+typedef _SetStrD = void Function(Pointer<Utf8>);
 typedef _VoidC = Void Function();
 typedef _VoidD = void Function();
 typedef _IntC = Int32 Function();
@@ -90,6 +111,9 @@ class LlamaNative implements LlamaNativeApi {
         _unload = lib.lookupFunction<_VoidC, _VoidD>('agenthq_unload'),
         _isLoaded = lib.lookupFunction<_IntC, _IntD>('agenthq_is_loaded'),
         _gpuLayers = lib.lookupFunction<_IntC, _IntD>('agenthq_gpu_layers'),
+        _gpuBackend = lib.lookupFunction<_IntC, _IntD>('agenthq_gpu_backend'),
+        _modelLayers = lib.lookupFunction<_IntC, _IntD>('agenthq_model_layers'),
+        _setCacheDir = lib.lookupFunction<_SetStrC, _SetStrD>('agenthq_set_cache_dir'),
         _gpuInfo = lib.lookupFunction<_GpuInfoC, _GpuInfoD>('agenthq_gpu_info'),
         _start = lib.lookupFunction<_StartC, _StartD>('agenthq_start'),
         _next = lib.lookupFunction<_NextC, _NextD>('agenthq_next'),
@@ -115,6 +139,9 @@ class LlamaNative implements LlamaNativeApi {
   final _VoidD _unload;
   final _IntD _isLoaded;
   final _IntD _gpuLayers;
+  final _IntD _gpuBackend;
+  final _IntD _modelLayers;
+  final _SetStrD _setCacheDir;
   final _GpuInfoD _gpuInfo;
   final _StartD _start;
   final _NextD _next;
@@ -124,10 +151,17 @@ class LlamaNative implements LlamaNativeApi {
   final Pointer<Uint8> _pieceBuf;
 
   @override
-  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch, int nGpuLayers = 0}) {
+  void load(
+    String modelPath, {
+    required int nCtx,
+    required int nThreads,
+    required int nBatch,
+    int nGpuLayers = 0,
+    int backend = 0,
+  }) {
     final path = modelPath.toNativeUtf8();
     try {
-      _check(_load(path, nCtx, nThreads, nBatch, nGpuLayers));
+      _check(_load(path, nCtx, nThreads, nBatch, nGpuLayers, backend));
     } finally {
       calloc.free(path);
     }
@@ -143,11 +177,27 @@ class LlamaNative implements LlamaNativeApi {
   int get gpuLayers => _gpuLayers();
 
   @override
-  Map<String, Object?> gpuInfo() {
+  int get gpuBackend => _gpuBackend();
+
+  @override
+  int get modelLayers => _modelLayers();
+
+  @override
+  void setCacheDir(String? dir) {
+    final p = (dir ?? '').toNativeUtf8();
+    try {
+      _setCacheDir(p);
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  @override
+  Map<String, Object?> gpuInfo(int backend) {
     const cap = 512;
     final buf = calloc<Uint8>(cap);
     try {
-      final n = _gpuInfo(buf.cast<Utf8>(), cap);
+      final n = _gpuInfo(backend, buf.cast<Utf8>(), cap);
       if (n < 0) throw LlamaNativeException(n, lastError());
       final decoded = jsonDecode(utf8.decode(buf.asTypedList(n)));
       return decoded is Map ? decoded.cast<String, Object?>() : const {};
@@ -206,6 +256,8 @@ class LlamaNative implements LlamaNativeApi {
         'prompt_tokens': i[0],
         'gen_tokens': i[1],
         'gpu_layers': _gpuLayers(),
+        'gpu_backend': _gpuBackend(),
+        'model_layers': _modelLayers(),
       };
     } finally {
       calloc.free(d);

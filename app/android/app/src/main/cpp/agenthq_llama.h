@@ -23,20 +23,32 @@ enum agenthq_error {
     AGENTHQ_ERR_GRAMMAR        = -8,
     AGENTHQ_ERR_NOT_GENERATING = -9,
     AGENTHQ_ERR_BUFFER_SMALL   = -10,
-    // n_gpu_layers > 0 was requested but no usable Vulkan device exists (no
-    // driver, Vulkan < 1.2, backend not compiled in) or the GPU load/context
-    // creation failed. Caller should retry with n_gpu_layers = 0.
+    // n_gpu_layers > 0 was requested but the selected GPU backend has no usable
+    // device (no driver, Vulkan < 1.2, backend not compiled in, kernels failed
+    // to compile) or the GPU load/context creation failed. Caller should retry
+    // with n_gpu_layers = 0 / backend = AGENTHQ_BACKEND_CPU.
     AGENTHQ_ERR_GPU_UNAVAILABLE = -11,
     // agenthq_stop() was called while the prompt was still being decoded.
     AGENTHQ_ERR_CANCELLED       = -12,
 };
 
+// GPU backend selector for agenthq_load / agenthq_gpu_info. Both GPU backends
+// are compiled into the same .so; only the selected one is initialised for a
+// load (ggml's device list is restricted to that backend's device).
+enum agenthq_backend {
+    AGENTHQ_BACKEND_CPU    = 0,
+    AGENTHQ_BACKEND_VULKAN = 1,
+    AGENTHQ_BACKEND_OPENCL = 2,
+};
+
 // Loads a GGUF model and creates a context. n_batch <= 0 -> 512.
 // n_gpu_layers: 0 = CPU only (default/safe), N = offload N layers to the GPU
-// (Vulkan), >= 99 or negative = all layers. Returns 0 or a negative
-// agenthq_error; details in agenthq_last_error().
+// selected by `backend`, >= 99 or negative = all layers. The remaining layers
+// and the n_threads CPU threads are used as usual (hybrid GPU+CPU).
+// backend: agenthq_backend; ignored when n_gpu_layers == 0.
+// Returns 0 or a negative agenthq_error; details in agenthq_last_error().
 AGENTHQ_API int agenthq_load(const char* model_path, int n_ctx, int n_threads, int n_batch,
-                             int n_gpu_layers);
+                             int n_gpu_layers, int backend);
 AGENTHQ_API void agenthq_unload(void);
 AGENTHQ_API int agenthq_is_loaded(void);
 
@@ -44,14 +56,29 @@ AGENTHQ_API int agenthq_is_loaded(void);
 // (0 when CPU only or nothing loaded).
 AGENTHQ_API int agenthq_gpu_layers(void);
 
-// Queries the ggml backend device registry (no model needed) and writes JSON:
-//   {"available":true,"backend":"vulkan","device":"Mali-G610 MC6",
-//    "vram_mb":7812,"integrated":true}
-// or {"available":false,"backend":"vulkan","device":"","vram_mb":0,"integrated":false}.
-// Returns bytes written (excluding NUL) or AGENTHQ_ERR_BUFFER_SMALL. Safe to
-// call on devices without a Vulkan driver (the backend simply registers no
-// device).
-AGENTHQ_API int agenthq_gpu_info(char* out, int cap);
+// agenthq_backend actually used by the loaded model (AGENTHQ_BACKEND_CPU when
+// nothing is offloaded or nothing is loaded).
+AGENTHQ_API int agenthq_gpu_backend(void);
+
+// Transformer layer count (n_layer) of the loaded model, 0 when nothing is
+// loaded. Used by the UI for the "balanced" GPU/CPU split preset.
+AGENTHQ_API int agenthq_model_layers(void);
+
+// Directory for the OpenCL kernel binary cache (GGML_OPENCL_KERNEL_CACHE_DIR);
+// call before the first load. Compiling the ~200 embedded kernels on the GPU
+// driver takes seconds on every load without it. NULL/"" disables the cache.
+AGENTHQ_API void agenthq_set_cache_dir(const char* dir);
+
+// Queries one GPU backend (no model needed) and writes JSON:
+//   {"available":true,"backend":"opencl","device":"Mali-G610 MC6",
+//    "vram_mb":7812,"integrated":true,"api_version":"OpenCL 3.0","reason":""}
+// or {"available":false,"backend":"vulkan","device":"","vram_mb":0,
+//     "integrated":false,"api_version":"1.1","reason":"Vulkan 1.1 (ggml butuh 1.2)"}.
+// `reason` is Indonesian UI text. Returns bytes written (excluding NUL),
+// AGENTHQ_ERR_BUFFER_SMALL or AGENTHQ_ERR_INVALID_ARG for backend 0/unknown.
+// Never crashes on a missing driver: the Vulkan apiVersion is probed before
+// ggml-vulkan is touched and the OpenCL ICD loader simply finds no platform.
+AGENTHQ_API int agenthq_gpu_info(int backend, char* out, int cap);
 
 // Clears memory, decodes the prompt (special tokens parsed) and prepares the
 // sampler chain. Fails with AGENTHQ_ERR_PROMPT_TOO_LONG if

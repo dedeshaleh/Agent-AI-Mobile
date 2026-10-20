@@ -18,6 +18,16 @@ option(AGENTHQ_GPU_VULKAN "Build the ggml Vulkan backend into libagenthq_llama.s
 set(AGENTHQ_VULKAN_HEADERS_TAG "v1.4.363"             CACHE STRING "KhronosGroup/Vulkan-Headers tag (vulkan.hpp; NDK ships only the C headers)")
 set(AGENTHQ_SPIRV_HEADERS_TAG  "vulkan-sdk-1.4.363.0" CACHE STRING "KhronosGroup/SPIRV-Headers tag (spirv/unified1/spirv.hpp)")
 
+# Optional second GPU backend (ggml OpenCL) for GPUs whose Vulkan driver is too old
+# for ggml-vulkan (Mali-G610 on the Infinix X6871 reports Vulkan 1.1). Headers and the
+# Khronos ICD loader are fetched and the loader is linked *statically*, so the .so has
+# no NEEDED on libOpenCL.so; the loader dlopen()s the vendor driver at runtime
+# (agenthq_llama.cpp sets OCL_ICD_FILENAMES=libOpenCL.so). Needs python3 on the host
+# for ggml's kernel embedding script.
+option(AGENTHQ_GPU_OPENCL "Build the ggml OpenCL backend into libagenthq_llama.so" ON)
+set(AGENTHQ_OPENCL_HEADERS_TAG "v2026.05.29" CACHE STRING "KhronosGroup/OpenCL-Headers tag")
+set(AGENTHQ_OPENCL_LOADER_TAG  "v2026.05.29" CACHE STRING "KhronosGroup/OpenCL-ICD-Loader tag")
+
 set(BUILD_SHARED_LIBS      OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP            OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE            OFF CACHE BOOL "" FORCE)
@@ -139,6 +149,66 @@ else()
   set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
 endif()
 
+# --- OpenCL backend prerequisites ------------------------------------------
+set(AGENTHQ_GPU_OPENCL_ENABLED OFF)
+if (AGENTHQ_GPU_OPENCL AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  # ggml-opencl b11727 does not compile for 32-bit targets (int64 -> size_t narrowing in
+  # work-size initialisers); Gradle still configures armeabi-v7a for debug builds.
+  message(STATUS "agenthq: GGML_OPENCL skipped for 32-bit ABI ${ANDROID_ABI}")
+  set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
+elseif (AGENTHQ_GPU_OPENCL)
+  set(_agenthq_cl_ok ON)
+
+  # ggml-opencl embeds its kernels with kernels/embed_kernel.py (find_package(Python3)).
+  if (NOT Python3_EXECUTABLE)
+    set(_agenthq_py_hints "")
+    if (CMAKE_HOST_WIN32)
+      file(GLOB _agenthq_py_hints "$ENV{LOCALAPPDATA}/Programs/Python/Python3*" "C:/Python3*")
+    endif()
+    find_program(Python3_EXECUTABLE NAMES python3 python HINTS ${_agenthq_py_hints} NO_CMAKE_FIND_ROOT_PATH)
+  endif()
+  if (NOT Python3_EXECUTABLE)
+    message(WARNING "agenthq: python3 not found (needed by ggml-opencl to embed kernels); building without OpenCL.")
+    set(_agenthq_cl_ok OFF)
+  endif()
+
+  if (_agenthq_cl_ok)
+    FetchContent_Declare(opencl_headers
+      GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-Headers.git
+      GIT_TAG        ${AGENTHQ_OPENCL_HEADERS_TAG}
+      GIT_SHALLOW    TRUE)
+    FetchContent_Declare(opencl_icd_loader
+      GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-ICD-Loader.git
+      GIT_TAG        ${AGENTHQ_OPENCL_LOADER_TAG}
+      GIT_SHALLOW    TRUE)
+    FetchContent_Populate(opencl_headers)
+    set(AGENTHQ_OPENCL_INCLUDE_DIR "${opencl_headers_SOURCE_DIR}" CACHE INTERNAL "OpenCL-Headers include dir (CL/cl.h)")
+
+    # Static ICD loader: target `OpenCL` (+ alias OpenCL::OpenCL). No layers/tools/tests.
+    set(OPENCL_ICD_LOADER_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(OPENCL_ICD_LOADER_BUILD_TESTING     OFF CACHE BOOL "" FORCE)
+    set(OPENCL_ICD_LOADER_PIC               ON  CACHE BOOL "" FORCE)
+    set(ENABLE_OPENCL_LAYERS                OFF CACHE BOOL "" FORCE)
+    set(ENABLE_OPENCL_LAYERINFO             OFF CACHE BOOL "" FORCE)
+    set(OPENCL_ICD_LOADER_HEADERS_DIR "${AGENTHQ_OPENCL_INCLUDE_DIR}" CACHE PATH "" FORCE)
+    FetchContent_MakeAvailable(opencl_icd_loader)
+
+    # ggml-opencl's find_package(OpenCL REQUIRED) is answered by cmake/modules/FindOpenCL.cmake.
+    list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules")
+    set(GGML_OPENCL                    ON  CACHE BOOL "" FORCE)
+    set(GGML_OPENCL_EMBED_KERNELS      ON  CACHE BOOL "" FORCE)  # no .cl files needed at runtime
+    set(GGML_OPENCL_USE_ADRENO_KERNELS OFF CACHE BOOL "" FORCE)  # Mali: generic kernels only
+    set(GGML_OPENCL_USE_ADRENO_BIN_KERNELS OFF CACHE BOOL "" FORCE)
+    set(GGML_OPENCL_PROFILING          OFF CACHE BOOL "" FORCE)
+    set(AGENTHQ_GPU_OPENCL_ENABLED ON)
+    message(STATUS "agenthq: GGML_OPENCL=ON (headers: ${AGENTHQ_OPENCL_INCLUDE_DIR}; static ICD loader; python: ${Python3_EXECUTABLE})")
+  else()
+    set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
+  endif()
+else()
+  set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_Declare(
   llama_cpp
   GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
@@ -148,10 +218,17 @@ FetchContent_Declare(
   GIT_CONFIG     core.longpaths=true # Windows: some llama.cpp paths exceed MAX_PATH in deep build dirs
   # Mali/Android: make ggml's buffer-device-address use opt-out (GGML_VK_DISABLE_BDA),
   # otherwise the first Vulkan host buffer dereferences a NULL loader entry.
+  # ggml-opencl: accept non-Adreno GPUs and turn kernel-compile exit(1) into exceptions.
   PATCH_COMMAND  ${CMAKE_COMMAND} -DSRC=<SOURCE_DIR> -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch-ggml-vulkan.cmake
+         COMMAND ${CMAKE_COMMAND} -DSRC=<SOURCE_DIR> -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch-ggml-opencl.cmake
   UPDATE_DISCONNECTED TRUE
 )
 FetchContent_MakeAvailable(llama_cpp)
+
+if (AGENTHQ_GPU_OPENCL_ENABLED AND TARGET ggml-opencl)
+  # The patched exit(1) paths throw; exceptions must unwind through ggml-opencl.
+  target_compile_options(ggml-opencl PRIVATE -fexceptions -frtti)
+endif()
 
 if (AGENTHQ_GPU_VULKAN_ENABLED AND TARGET ggml-vulkan)
   # spirv.hpp is included via __has_include; ggml-vulkan's CMake only checks the package exists.
@@ -172,6 +249,11 @@ target_compile_options(agenthq_llama PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(agenthq_llama PRIVATE llama ggml)
 if (AGENTHQ_GPU_VULKAN_ENABLED)
   target_compile_definitions(agenthq_llama PRIVATE AGENTHQ_HAVE_VULKAN=1)
+endif()
+if (AGENTHQ_GPU_OPENCL_ENABLED)
+  # The shim calls clGetPlatformIDs/clGetDeviceInfo itself (driver probe for gpu_info).
+  target_compile_definitions(agenthq_llama PRIVATE AGENTHQ_HAVE_OPENCL=1 CL_TARGET_OPENCL_VERSION=300)
+  target_link_libraries(agenthq_llama PRIVATE OpenCL)
 endif()
 if (ANDROID)
   target_link_libraries(agenthq_llama PRIVATE log)

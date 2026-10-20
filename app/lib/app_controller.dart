@@ -18,8 +18,11 @@ import 'ai/ai_provider.dart';
 import 'ai/ai_router.dart';
 import 'ai/ai_settings.dart';
 import 'ai/api_key_store.dart';
+import 'ai/local/gpu_auto_tuner.dart';
 import 'ai/local/llama_ffi_engine.dart';
 import 'ai/local/local_engine.dart';
+
+export 'ai/local/gpu_auto_tuner.dart' show AutoTuneAttempt, AutoTuneResult;
 import 'ai/model_manager.dart';
 import 'ai/usage_log.dart';
 import 'data/analysis_result.dart';
@@ -83,7 +86,8 @@ class AppController extends ChangeNotifier {
     try {
       _prefs = await SharedPreferences.getInstance();
       _supportDir = await getApplicationSupportDirectory();
-      engine = LlamaFfiEngine();
+      // cl-cache: binary kernel OpenCL yang sudah dikompilasi driver (lihat docs/AI_PROVIDERS.md).
+      engine = LlamaFfiEngine(cacheDir: p.join(_supportDir.path, 'cl-cache'));
       settingsStore = AiSettingsStore(_prefs);
       keyStore = SecureApiKeyStore();
       usage = UsageLog.file(p.join(_supportDir.path, 'usage_log.json'));
@@ -149,21 +153,27 @@ class AppController extends ChangeNotifier {
         'Model akan di-swap ke storage dan jawaban jadi sangat lambat. Tutup aplikasi lain atau pakai model lebih kecil (Qwen3 1.7B).';
   }
 
-  Future<String?> loadActiveModel() async {
+  /// Memuat model aktif dengan backend/layer dari setelan (atau [gpuLayers] /
+  /// [backend] bila diberikan). Mengembalikan pesan untuk pengguna (null = sukses
+  /// tanpa catatan). Bila GPU diminta tetapi backend-nya tidak tersedia (-11),
+  /// model dimuat ulang di CPU dan pesannya menyebut backend yang gagal.
+  Future<String?> loadActiveModel({int? gpuLayers, LocalGpuBackend? backend, bool fallbackToCpu = true}) async {
     final path = models.activeModelPath;
     if (path == null || !File(path).existsSync()) return 'Belum ada model aktif. Buka menu Model.';
-    final gpuLayers = settings.effectiveGpuLayers;
+    final useBackend = backend ?? settings.gpuBackend;
+    final layers = useBackend.isGpu ? (gpuLayers ?? settings.gpuLayers) : 0;
     try {
       try {
-        await engine.load(path, contextLength: settings.contextLength, threads: settings.threads, gpuLayers: gpuLayers);
+        await engine.load(path,
+            contextLength: settings.contextLength, threads: settings.threads, gpuLayers: layers, backend: useBackend);
         return null;
       } on LocalEngineException catch (e) {
-        if (gpuLayers <= 0 || !e.isGpuUnavailable) rethrow;
-        // GPU diminta tetapi tidak ada perangkat Vulkan yang bisa dipakai:
+        if (layers <= 0 || !e.isGpuUnavailable || !fallbackToCpu) rethrow;
+        // GPU diminta tetapi backend itu tidak punya perangkat yang bisa dipakai:
         // muat ulang di CPU dan beri tahu pengguna (setelan GPU tetap tersimpan).
         debugPrint('loadActiveModel: ${e.message}; fallback ke CPU');
         await engine.load(path, contextLength: settings.contextLength, threads: settings.threads, gpuLayers: 0);
-        return 'GPU tidak tersedia, memakai CPU';
+        return 'GPU ${useBackend.label} tidak tersedia, memakai CPU';
       }
     } on LocalEngineException catch (e) {
       return e.message;
@@ -173,6 +183,75 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> unloadModel() => engine.unload();
+
+  // ---------------------------------------------------------------- benchmark
+
+  /// Prompt benchmark singkat (dipakai layar Model dan uji otomatis).
+  static String benchmarkPrompt() => formatChatMl([
+        (role: 'system', content: 'Jawab singkat dalam bahasa Indonesia.'),
+        (role: 'user', content: 'Sebutkan tiga manfaat mencatat penjualan harian untuk toko kecil.'),
+      ]);
+
+  static const benchmarkMaxTokens = 96;
+
+  /// Menjalankan benchmark singkat pada model yang sedang dimuat; [onText]
+  /// menerima teks parsial. Mengembalikan `engine.lastStats` + `elapsed_ms`.
+  Future<Map<String, Object?>> runBenchmark({void Function(String text)? onText}) async {
+    final buffer = StringBuffer();
+    final sw = Stopwatch()..start();
+    await for (final piece in engine.generate(
+        benchmarkPrompt(), const LocalGenerateOptions(maxTokens: benchmarkMaxTokens, temperature: 0.3))) {
+      buffer.write(piece);
+      onText?.call(buffer.toString());
+    }
+    sw.stop();
+    return {...engine.lastStats, 'elapsed_ms': sw.elapsedMilliseconds, 'text': buffer.toString()};
+  }
+
+  GpuAutoTuner? _tuner;
+  bool get autoTuning => _tuner != null;
+
+  void cancelAutoTune() => _tuner?.cancel();
+
+  /// Uji otomatis pembagian beban untuk [backend] (default: backend di setelan,
+  /// atau GPU pertama yang terdeteksi bila setelan masih CPU): memuat model
+  /// aktif tiga kali (CPU / seimbang / GPU penuh), menjalankan benchmark
+  /// singkat, memilih tok/s tertinggi ([GpuAutoTuner]), menyimpannya ke setelan
+  /// (backend + gpuLayers) dan memuat ulang dengan pilihan itu. Percobaan yang
+  /// gagal (termasuk -11) dicatat sebagai gagal dan uji dilanjutkan. Pemanggil
+  /// memeriksa [memoryWarningForActiveModel] dulu.
+  Future<AutoTuneResult> autoTune({LocalGpuBackend? backend, void Function(AutoTuneAttempt attempt)? onAttempt}) async {
+    if (_tuner != null) throw StateError('Uji otomatis sedang berjalan');
+    var useBackend = backend ?? settings.gpuBackend;
+    if (!useBackend.isGpu) {
+      final report = await engine.gpuInfo().catchError((_) => LocalGpuReport.none);
+      useBackend = report.firstAvailable ?? LocalGpuBackend.cpu;
+    }
+    final tuner = _tuner = GpuAutoTuner(
+      engine: engine,
+      load: (layers, b) => loadActiveModel(gpuLayers: layers, backend: b, fallbackToCpu: false),
+      benchmark: runBenchmark,
+    );
+    notifyListeners();
+    try {
+      final result = await tuner.run(useBackend, onAttempt: onAttempt);
+      final best = result.best;
+      if (!result.cancelled) {
+        if (best != null) {
+          final layerCount = engine.loadedModel?.layerCount;
+          await settingsStore.update((s) => s.copyWith(
+                gpuBackend: best.backend.isGpu ? best.backend : (useBackend.isGpu ? useBackend : s.gpuBackend),
+                gpuLayers: result.bestGpuLayers(layerCount: layerCount) ?? s.gpuLayers,
+              ));
+        }
+        await loadActiveModel();
+      }
+      return result;
+    } finally {
+      _tuner = null;
+      notifyListeners();
+    }
+  }
 
   // ---------------------------------------------------------------- data
 

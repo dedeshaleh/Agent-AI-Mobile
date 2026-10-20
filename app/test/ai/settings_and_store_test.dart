@@ -39,29 +39,73 @@ void main() {
       }
     });
 
-    test('default backend CPU: useGpu false, gpuLayers 99 (semua), effective 0', () {
+    test('default backend CPU: gpuBackend cpu, gpuLayers 99 (semua), effective 0', () {
       const s = AiSettings();
+      expect(s.gpuBackend, LocalGpuBackend.cpu);
       expect(s.useGpu, isFalse);
       expect(s.gpuLayers, AiSettings.allGpuLayers);
       expect(s.effectiveGpuLayers, 0);
-      expect(s.copyWith(useGpu: true).effectiveGpuLayers, 99);
-      expect(s.copyWith(useGpu: true, gpuLayers: 20).effectiveGpuLayers, 20);
+      expect(s.copyWith(gpuBackend: LocalGpuBackend.vulkan).effectiveGpuLayers, 99);
+      expect(s.copyWith(gpuBackend: LocalGpuBackend.opencl, gpuLayers: 20).effectiveGpuLayers, 20);
+      expect(s.copyWith(gpuBackend: LocalGpuBackend.opencl, gpuLayers: 0).effectiveGpuLayers, 0);
       // JSON lama tanpa field GPU tetap CPU.
       final legacy = AiSettings.fromJson({'mode': 'offlineOnly', 'threads': 4});
-      expect(legacy.useGpu, isFalse);
+      expect(legacy.gpuBackend, LocalGpuBackend.cpu);
       expect(legacy.gpuLayers, 99);
     });
 
+    test('migrasi use_gpu=true tanpa gpu_backend -> vulkan; gpu_backend menang', () {
+      expect(AiSettings.fromJson({'use_gpu': true}).gpuBackend, LocalGpuBackend.vulkan);
+      expect(AiSettings.fromJson({'use_gpu': false}).gpuBackend, LocalGpuBackend.cpu);
+      expect(AiSettings.fromJson({'use_gpu': true, 'gpu_backend': 'opencl'}).gpuBackend, LocalGpuBackend.opencl);
+      expect(AiSettings.fromJson({'use_gpu': true, 'gpu_backend': 'cpu'}).gpuBackend, LocalGpuBackend.cpu);
+      expect(AiSettings.fromJson({'gpu_backend': 'metal'}).gpuBackend, LocalGpuBackend.cpu);
+    });
+
     test('JSON round-trip GPU fields', () {
-      final s = AiSettings.defaults.copyWith(useGpu: true, gpuLayers: 24);
+      final s = AiSettings.defaults.copyWith(gpuBackend: LocalGpuBackend.opencl, gpuLayers: 24);
       final json = s.toJson();
       expect(json['use_gpu'], isTrue);
+      expect(json['gpu_backend'], 'opencl');
       expect(json['gpu_layers'], 24);
       final back = AiSettings.fromJson((jsonDecode(jsonEncode(json)) as Map).cast<String, Object?>());
       expect(back, s);
-      expect(back.useGpu, isTrue);
+      expect(back.gpuBackend, LocalGpuBackend.opencl);
       expect(back.gpuLayers, 24);
       expect(back, isNot(AiSettings.defaults));
+    });
+
+    test('preset pembagian beban <-> gpuLayers', () {
+      expect(AiSettings.presetFor(0), GpuSplitPreset.cpu);
+      expect(AiSettings.presetFor(-3), GpuSplitPreset.cpu);
+      expect(AiSettings.presetFor(1), GpuSplitPreset.balanced);
+      expect(AiSettings.presetFor(18), GpuSplitPreset.balanced);
+      expect(AiSettings.presetFor(98), GpuSplitPreset.balanced);
+      expect(AiSettings.presetFor(99), GpuSplitPreset.full);
+      expect(AiSettings.presetFor(999), GpuSplitPreset.full);
+
+      expect(AiSettings.layersForPreset(GpuSplitPreset.cpu), 0);
+      expect(AiSettings.layersForPreset(GpuSplitPreset.full), 99);
+      expect(AiSettings.layersForPreset(GpuSplitPreset.full, layerCount: 36), 99);
+      // Seimbang: setengah n_layer bila diketahui, 18 bila tidak.
+      expect(AiSettings.layersForPreset(GpuSplitPreset.balanced), AiSettings.defaultBalancedLayers);
+      expect(AiSettings.layersForPreset(GpuSplitPreset.balanced, layerCount: 0), 18);
+      expect(AiSettings.layersForPreset(GpuSplitPreset.balanced, layerCount: 36), 18);
+      expect(AiSettings.layersForPreset(GpuSplitPreset.balanced, layerCount: 28), 14);
+      expect(AiSettings.layersForPreset(GpuSplitPreset.balanced, layerCount: 29), 15);
+      expect(AiSettings.layersForPreset(GpuSplitPreset.balanced, layerCount: 1), 1);
+      // Bolak-balik konsisten.
+      for (final p in GpuSplitPreset.values) {
+        expect(AiSettings.presetFor(AiSettings.layersForPreset(p, layerCount: 36)), p);
+      }
+
+      final s = AiSettings.defaults.copyWith(gpuBackend: LocalGpuBackend.opencl);
+      expect(s.gpuPreset, GpuSplitPreset.full);
+      final balanced = s.withGpuPreset(GpuSplitPreset.balanced, layerCount: 36);
+      expect(balanced.gpuLayers, 18);
+      expect(balanced.gpuPreset, GpuSplitPreset.balanced);
+      expect(balanced.gpuBackend, LocalGpuBackend.opencl, reason: 'preset hanya mengubah gpuLayers');
+      expect(s.withGpuPreset(GpuSplitPreset.cpu).effectiveGpuLayers, 0);
     });
 
     test('JSON round-trip', () {

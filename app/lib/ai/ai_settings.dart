@@ -8,6 +8,20 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../agents/agent_role.dart';
 import 'ai_provider.dart';
+import 'local/local_engine.dart';
+
+export 'local/local_engine.dart' show LocalGpuBackend;
+
+/// Preset pembagian beban GPU/CPU; dipetakan ke/dari [AiSettings.gpuLayers]
+/// (satu sumber kebenaran), lihat [AiSettings.presetFor] / [AiSettings.layersForPreset].
+enum GpuSplitPreset {
+  cpu('CPU'),
+  balanced('Seimbang (GPU+CPU)'),
+  full('GPU penuh');
+
+  const GpuSplitPreset(this.label);
+  final String label;
+}
 
 @immutable
 class AiSettings {
@@ -19,7 +33,7 @@ class AiSettings {
     this.contextLength = 2048,
     this.threads = 4,
     this.maxTokens = 256,
-    this.useGpu = false,
+    this.gpuBackend = LocalGpuBackend.cpu,
     this.gpuLayers = 99,
   });
 
@@ -35,18 +49,44 @@ class AiSettings {
   final int threads;
   final int maxTokens;
 
-  /// Backend inferensi lokal: false = CPU (default aman), true = GPU Vulkan
+  /// Backend inferensi lokal: CPU (default aman), Vulkan atau OpenCL
   /// (eksperimental, per perangkat; keputusan berdasarkan benchmark).
-  final bool useGpu;
+  final LocalGpuBackend gpuBackend;
 
-  /// Layer yang di-offload ke GPU bila [useGpu]; 99 = semua layer.
+  /// true bila backend GPU dipilih (kompatibilitas dengan kode lama).
+  bool get useGpu => gpuBackend.isGpu;
+
+  /// Layer yang di-offload ke GPU bila [gpuBackend] GPU; 0 = CPU walau backend
+  /// GPU dipilih, 99 = semua layer, di antaranya = hybrid GPU+CPU.
   final int gpuLayers;
 
   /// Nilai [gpuLayers] yang berarti "semua layer".
   static const allGpuLayers = 99;
 
+  /// Layer GPU untuk preset seimbang bila jumlah layer model belum diketahui.
+  static const defaultBalancedLayers = 18;
+
   /// Layer GPU efektif yang dikirim ke engine (0 bila CPU).
   int get effectiveGpuLayers => useGpu ? gpuLayers : 0;
+
+  /// Preset untuk [gpuLayers]: 0 → CPU, >= 99 → GPU penuh, lainnya → seimbang.
+  static GpuSplitPreset presetFor(int gpuLayers) {
+    if (gpuLayers <= 0) return GpuSplitPreset.cpu;
+    if (gpuLayers >= allGpuLayers) return GpuSplitPreset.full;
+    return GpuSplitPreset.balanced;
+  }
+
+  /// [gpuLayers] untuk [preset]; seimbang = setengah `n_layer` model
+  /// ([layerCount], dibulatkan ke atas, min 1) atau [defaultBalancedLayers]
+  /// bila belum diketahui.
+  static int layersForPreset(GpuSplitPreset preset, {int? layerCount}) => switch (preset) {
+        GpuSplitPreset.cpu => 0,
+        GpuSplitPreset.full => allGpuLayers,
+        GpuSplitPreset.balanced =>
+          layerCount == null || layerCount <= 0 ? defaultBalancedLayers : ((layerCount + 1) ~/ 2).clamp(1, allGpuLayers - 1),
+      };
+
+  GpuSplitPreset get gpuPreset => presetFor(gpuLayers);
 
   static const defaults = AiSettings();
 
@@ -77,7 +117,7 @@ class AiSettings {
     int? contextLength,
     int? threads,
     int? maxTokens,
-    bool? useGpu,
+    LocalGpuBackend? gpuBackend,
     int? gpuLayers,
   }) =>
       AiSettings(
@@ -88,9 +128,13 @@ class AiSettings {
         contextLength: contextLength ?? this.contextLength,
         threads: threads ?? this.threads,
         maxTokens: maxTokens ?? this.maxTokens,
-        useGpu: useGpu ?? this.useGpu,
+        gpuBackend: gpuBackend ?? this.gpuBackend,
         gpuLayers: gpuLayers ?? this.gpuLayers,
       );
+
+  /// Menerapkan preset pembagian beban (mengubah hanya [gpuLayers]).
+  AiSettings withGpuPreset(GpuSplitPreset preset, {int? layerCount}) =>
+      copyWith(gpuLayers: layersForPreset(preset, layerCount: layerCount));
 
   AiSettings upsertProvider(ProviderConfig cfg) {
     final list = [...providers];
@@ -122,7 +166,8 @@ class AiSettings {
         'context_length': contextLength,
         'threads': threads,
         'max_tokens': maxTokens,
-        'use_gpu': useGpu,
+        'use_gpu': useGpu, // kompatibilitas mundur
+        'gpu_backend': gpuBackend.name,
         'gpu_layers': gpuLayers,
       };
 
@@ -148,6 +193,11 @@ class AiSettings {
     } catch (_) {
       mode = AiMode.offlineOnly;
     }
+    // Migrasi: prefs lama hanya punya `use_gpu` (true = Vulkan).
+    final rawBackend = json['gpu_backend'];
+    final gpuBackend = rawBackend is String
+        ? LocalGpuBackend.fromName(rawBackend)
+        : ((json['use_gpu'] as bool?) ?? false ? LocalGpuBackend.vulkan : LocalGpuBackend.cpu);
     return AiSettings(
       mode: mode,
       providers: providers,
@@ -156,7 +206,7 @@ class AiSettings {
       contextLength: (json['context_length'] as int?) ?? 2048,
       threads: (json['threads'] as int?) ?? 4,
       maxTokens: (json['max_tokens'] as int?) ?? 256,
-      useGpu: (json['use_gpu'] as bool?) ?? false,
+      gpuBackend: gpuBackend,
       gpuLayers: (json['gpu_layers'] as int?) ?? allGpuLayers,
     );
   }

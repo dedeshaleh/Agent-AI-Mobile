@@ -56,28 +56,60 @@ void main() {
       expect(engine.loadedModel?.usesGpu, isFalse);
     });
 
-    test('gpuLayers is passed to the native API and the used count is reported', () async {
-      await engine.load('/models/qwen.gguf', gpuLayers: 12);
+    test('gpuLayers + backend are passed to the native API and the used count is reported', () async {
+      await engine.load('/models/qwen.gguf', gpuLayers: 12, backend: LocalGpuBackend.vulkan);
       expect(engine.lastStats['requested_gpu_layers'], 12);
+      expect(engine.lastStats['requested_backend'], 1);
       expect(engine.lastStats['gpu_layers'], 12);
+      expect(engine.lastStats['model_layers'], fakeModelLayers);
       expect(engine.loadedModel?.gpuLayers, 12);
+      expect(engine.loadedModel?.backend, LocalGpuBackend.vulkan);
+      expect(engine.loadedModel?.layerCount, fakeModelLayers);
       expect(engine.loadedModel?.usesGpu, isTrue);
+      expect(engine.loadedModel?.backendLabel, 'Vulkan 12/$fakeModelLayers layer + CPU 4 thread');
 
       // 99 = all layers -> clamped to n_layer + 1 like llama.cpp does.
-      await engine.load('/models/qwen.gguf', gpuLayers: 99);
+      await engine.load('/models/qwen.gguf', gpuLayers: 99, backend: LocalGpuBackend.opencl);
       expect(engine.lastStats['requested_gpu_layers'], 99);
+      expect(engine.lastStats['requested_backend'], 2);
       expect(engine.loadedModel?.gpuLayers, fakeModelLayers + 1);
+      expect(engine.loadedModel?.backend, LocalGpuBackend.opencl);
+      expect(engine.loadedModel?.backendLabel, 'OpenCL ${fakeModelLayers + 1} layer');
+    });
+
+    test('gpuLayers > 0 with backend cpu is sent as CPU (0 layers, backend 0)', () async {
+      await engine.load('/models/qwen.gguf', gpuLayers: 20);
+      expect(engine.lastStats['requested_gpu_layers'], 0);
+      expect(engine.lastStats['requested_backend'], 0);
+      expect(engine.loadedModel?.usesGpu, isFalse);
+      expect(engine.loadedModel?.backendLabel, 'CPU 4 thread');
+    });
+
+    test('cache dir is handed to the native API once, before the first load', () async {
+      final withCache = LlamaFfiEngine(createApi: createFakeApi, cacheDir: '/data/cl-cache');
+      addTearDown(withCache.dispose);
+      await withCache.load('/models/qwen.gguf');
+      await withCache.load('/models/qwen.gguf');
+      expect(withCache.lastStats['cache_dir'], '/data/cl-cache');
+      expect(withCache.lastStats['set_cache_dir_calls'], 1);
     });
 
     test('GPU unavailable -> LocalEngineException with isGpuUnavailable; CPU retry works', () async {
       await expectLater(
-        engine.load(gpuUnavailableModelPath, gpuLayers: 99),
+        engine.load(gpuUnavailableModelPath, gpuLayers: 99, backend: LocalGpuBackend.vulkan),
         throwsA(isA<LocalEngineException>()
             .having((e) => e.isGpuUnavailable, 'isGpuUnavailable', isTrue)
             .having((e) => e.code, 'code', LocalEngineException.gpuUnavailableCode)
             .having((e) => e.message, 'message', contains('Vulkan'))),
       );
       expect(engine.state, LocalEngineState.error);
+
+      await expectLater(
+        engine.load(gpuUnavailableModelPath, gpuLayers: 99, backend: LocalGpuBackend.opencl),
+        throwsA(isA<LocalEngineException>()
+            .having((e) => e.isGpuUnavailable, 'isGpuUnavailable', isTrue)
+            .having((e) => e.message, 'message', contains('OpenCL'))),
+      );
 
       await engine.load(gpuUnavailableModelPath, gpuLayers: 0);
       expect(engine.state, LocalEngineState.ready);
@@ -86,7 +118,7 @@ void main() {
 
     test('other native errors are not flagged as GPU unavailable', () async {
       await expectLater(
-        engine.load(failingModelPath, gpuLayers: 99),
+        engine.load(failingModelPath, gpuLayers: 99, backend: LocalGpuBackend.vulkan),
         throwsA(isA<LocalEngineException>().having((e) => e.isGpuUnavailable, 'isGpuUnavailable', isFalse)),
       );
     });
@@ -101,28 +133,56 @@ void main() {
   });
 
   group('gpuInfo', () {
-    test('works through the isolate before any model is loaded', () async {
-      final info = await engine.gpuInfo();
+    test('works through the isolate before any model is loaded and reports both backends', () async {
+      final report = await engine.gpuInfo();
+      final info = report.vulkan;
       expect(info.available, isTrue);
       expect(info.backend, 'vulkan');
+      expect(info.backendKind, LocalGpuBackend.vulkan);
       expect(info.device, 'Fake GPU "G1"');
       expect(info.vramMb, 4096);
       expect(info.integrated, isTrue);
       expect(info.label, 'Terdeteksi: Fake GPU "G1", VRAM bersama');
+      final cl = report.opencl;
+      expect(cl.available, isTrue);
+      expect(cl.backendKind, LocalGpuBackend.opencl);
+      expect(cl.label, 'Terdeteksi: Fake Mali, OpenCL 3.0, VRAM bersama');
+      expect(cl.labeledWithBackend, 'OpenCL: Terdeteksi: Fake Mali, OpenCL 3.0, VRAM bersama');
+      expect(report.of(LocalGpuBackend.opencl), same(cl));
+      expect(report.of(LocalGpuBackend.cpu), isNull);
+      expect(report.firstAvailable, LocalGpuBackend.vulkan);
       expect(engine.state, LocalEngineState.unloaded);
 
       await engine.load('/models/qwen.gguf');
-      expect(engine.lastStats['gpu_info_calls'], 1);
+      expect(engine.lastStats['gpu_info_calls'], 2);
     });
 
     test('LocalEngineGpuInfo JSON round-trip and labels', () {
       const none = LocalEngineGpuInfo.none;
       expect(none.available, isFalse);
       expect(none.label, 'Tidak ada GPU Vulkan');
+      expect(LocalEngineGpuInfo.noneOpenCl.label, 'Tidak ada GPU OpenCL');
+      expect(LocalEngineGpuInfo.noneOpenCl.labeledWithBackend, 'OpenCL: Tidak ada GPU OpenCL');
       final discrete = LocalEngineGpuInfo.fromJson({'available': true, 'device': 'Adreno 740', 'vram_mb': 2048});
       expect(discrete.label, 'Terdeteksi: Adreno 740, VRAM 2048 MB');
       expect(LocalEngineGpuInfo.fromJson(discrete.toJson()).toJson(), discrete.toJson());
       expect(LocalEngineGpuInfo.fromJson(const {}).available, isFalse);
+      final old = LocalEngineGpuInfo.fromJson({'available': false, 'backend': 'vulkan', 'api_version': '1.1', 'reason': 'Vulkan 1.1 (ggml butuh 1.2)'});
+      expect(old.labeledWithBackend, 'Vulkan: GPU tidak bisa dipakai: Vulkan 1.1 (ggml butuh 1.2)');
+      final noDriver = LocalEngineGpuInfo.fromJson({'available': false, 'backend': 'opencl', 'reason': 'Driver OpenCL tidak ditemukan'});
+      expect(noDriver.labeledWithBackend, 'OpenCL: GPU tidak bisa dipakai: Driver OpenCL tidak ditemukan');
+      expect(LocalGpuReport.none.firstAvailable, isNull);
+      expect(const LocalGpuReport(opencl: LocalEngineGpuInfo(available: true, backend: 'opencl')).firstAvailable, LocalGpuBackend.opencl);
+    });
+
+    test('LocalGpuBackend codes and names match the C ABI', () {
+      expect(LocalGpuBackend.cpu.nativeCode, 0);
+      expect(LocalGpuBackend.vulkan.nativeCode, 1);
+      expect(LocalGpuBackend.opencl.nativeCode, 2);
+      expect(LocalGpuBackend.fromNativeCode(2), LocalGpuBackend.opencl);
+      expect(LocalGpuBackend.fromNativeCode(7), LocalGpuBackend.cpu);
+      expect(LocalGpuBackend.fromName('opencl'), LocalGpuBackend.opencl);
+      expect(LocalGpuBackend.fromName(null), LocalGpuBackend.cpu);
     });
   });
 

@@ -156,26 +156,38 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
               const SizedBox(height: 8),
               const Text('Backend inferensi', style: TextStyle(fontSize: 13)),
               const SizedBox(height: 4),
-              SegmentedButton<bool>(
+              SegmentedButton<LocalGpuBackend>(
                 segments: const [
-                  ButtonSegment(value: false, label: Text('CPU'), icon: Icon(Icons.memory, size: 16)),
-                  ButtonSegment(value: true, label: Text('GPU (Vulkan, eksperimental)'), icon: Icon(Icons.videogame_asset_outlined, size: 16)),
+                  ButtonSegment(value: LocalGpuBackend.cpu, label: Text('CPU'), icon: Icon(Icons.memory, size: 16)),
+                  ButtonSegment(value: LocalGpuBackend.vulkan, label: Text('Vulkan'), icon: Icon(Icons.videogame_asset_outlined, size: 16)),
+                  ButtonSegment(value: LocalGpuBackend.opencl, label: Text('OpenCL'), icon: Icon(Icons.developer_board, size: 16)),
                 ],
-                selected: {s.useGpu},
-                onSelectionChanged: (v) => c.settingsStore.update((cur) => cur.copyWith(useGpu: v.first)),
+                selected: {s.gpuBackend},
+                onSelectionChanged: (v) => c.settingsStore.update((cur) => cur.copyWith(gpuBackend: v.first)),
               ),
+              _GpuInfoLine(engine: c.engine),
               if (s.useGpu) ...[
+                const SizedBox(height: 8),
+                const Text('Pembagian beban', style: TextStyle(fontSize: 13)),
+                const SizedBox(height: 4),
+                SegmentedButton<GpuSplitPreset>(
+                  segments: [for (final p in GpuSplitPreset.values) ButtonSegment(value: p, label: Text(p.label))],
+                  selected: {s.gpuPreset},
+                  onSelectionChanged: (v) => c.settingsStore.update((cur) => cur.withGpuPreset(v.first, layerCount: c.engine.loadedModel?.layerCount)),
+                ),
                 const SizedBox(height: 6),
-                _Slider('Layer di GPU', s.gpuLayers.toDouble().clamp(1, 99), 1, 99, 1, (v) => c.settingsStore.update((cur) => cur.copyWith(gpuLayers: v.round()))),
+                _Slider('Layer di GPU', s.gpuLayers.toDouble().clamp(0, 99), 0, 99, 1, (v) => c.settingsStore.update((cur) => cur.copyWith(gpuLayers: v.round()))),
                 Text(
-                  s.gpuLayers >= AiSettings.allGpuLayers
-                      ? '99 = semua layer ke GPU. Kurangi bila memori GPU tidak cukup atau game view tersendat.'
-                      : '${s.gpuLayers} layer ke GPU, sisanya CPU. 99 = semua layer.',
+                  s.gpuLayers <= 0
+                      ? '0 = semua layer di CPU (${s.threads} thread) walau backend GPU dipilih.'
+                      : s.gpuLayers >= AiSettings.allGpuLayers
+                          ? '99 = semua layer ke GPU ${s.gpuBackend.label}. Kurangi bila memori GPU tidak cukup atau game view tersendat.'
+                          : '${s.gpuLayers} layer ke GPU ${s.gpuBackend.label}, sisanya CPU ${s.threads} thread (hybrid). 99 = semua layer.'
+                              '${c.engine.loadedModel != null && c.engine.loadedModel!.layerCount > 0 ? ' Model aktif: ${c.engine.loadedModel!.layerCount} layer.' : ''}',
                   style: const TextStyle(fontSize: 11, color: HqColors.muted),
                 ),
               ],
-              _GpuInfoLine(engine: c.engine),
-              const Text('Perubahan context/thread/backend berlaku saat model dimuat ulang. Bila GPU tidak tersedia, model otomatis dimuat di CPU.', style: TextStyle(fontSize: 11, color: HqColors.muted)),
+              const Text('Perubahan context/thread/backend berlaku saat model dimuat ulang. Bila GPU tidak tersedia, model otomatis dimuat di CPU. Tombol "Uji otomatis" di menu Model memilih pembagian tercepat.', style: TextStyle(fontSize: 11, color: HqColors.muted)),
               const SizedBox(height: 18),
               const _Section('KEAMANAN'),
               SwitchListTile(
@@ -458,8 +470,9 @@ class _Section extends StatelessWidget {
       );
 }
 
-/// Satu baris "Terdeteksi: Mali-G610 MC6, VRAM bersama" / "Tidak ada GPU
-/// Vulkan". Ditanya sekali ke engine (lewat isolate pekerja), bukan tiap build.
+/// Dua baris deteksi, satu per backend: "Vulkan: GPU tidak bisa dipakai: Vulkan
+/// 1.1 (ggml butuh 1.2)" dan "OpenCL: Terdeteksi: Mali-G610 MC6, OpenCL 3.0,
+/// VRAM bersama". Ditanya sekali ke engine (lewat isolate pekerja), bukan tiap build.
 class _GpuInfoLine extends StatefulWidget {
   const _GpuInfoLine({required this.engine});
   final LocalEngine engine;
@@ -469,21 +482,31 @@ class _GpuInfoLine extends StatefulWidget {
 }
 
 class _GpuInfoLineState extends State<_GpuInfoLine> {
-  late final Future<LocalEngineGpuInfo> _info = widget.engine.gpuInfo().catchError((_) => LocalEngineGpuInfo.none);
+  late final Future<LocalGpuReport> _info = widget.engine.gpuInfo().catchError((_) => LocalGpuReport.none);
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<LocalEngineGpuInfo>(
+  Widget build(BuildContext context) => FutureBuilder<LocalGpuReport>(
         future: _info,
         builder: (context, snap) {
-          final info = snap.data;
-          final text = info == null ? 'Mendeteksi GPU Vulkan…' : info.label;
+          final report = snap.data;
+          if (report == null) {
+            return const Padding(
+              padding: EdgeInsets.only(top: 4, bottom: 2),
+              child: Text('Mendeteksi GPU (Vulkan, OpenCL)…', style: TextStyle(fontSize: 11, color: HqColors.muted)),
+            );
+          }
           return Padding(
             padding: const EdgeInsets.only(top: 4, bottom: 2),
-            child: Row(
+            child: Column(
               children: [
-                Icon(info?.available ?? false ? Icons.check_circle_outline : Icons.info_outline, size: 14, color: HqColors.muted),
-                const SizedBox(width: 6),
-                Expanded(child: Text(text, style: const TextStyle(fontSize: 11, color: HqColors.muted))),
+                for (final info in report.all)
+                  Row(
+                    children: [
+                      Icon(info.available ? Icons.check_circle_outline : Icons.info_outline, size: 14, color: info.available ? HqColors.local : HqColors.muted),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(info.labeledWithBackend, style: const TextStyle(fontSize: 11, color: HqColors.muted))),
+                    ],
+                  ),
               ],
             ),
           );

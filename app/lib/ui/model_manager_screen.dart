@@ -85,20 +85,13 @@ class _ModelManagerScreenState extends State<ModelManagerScreen> {
       _benchmarking = true;
       _benchmark = null;
     });
-    final buffer = StringBuffer();
-    final sw = Stopwatch()..start();
     try {
-      final prompt = formatChatMl([
-        (role: 'system', content: 'Jawab singkat dalam bahasa Indonesia.'),
-        (role: 'user', content: 'Sebutkan tiga manfaat mencatat penjualan harian untuk toko kecil.'),
-      ]);
-      await for (final piece in c.engine.generate(prompt, const LocalGenerateOptions(maxTokens: 96, temperature: 0.3))) {
-        buffer.write(piece);
-        if (mounted) setState(() => _benchmark = buffer.toString());
-      }
-      sw.stop();
-      final stats = c.engine.lastStats;
-      _benchmark = '${stripThinking(buffer.toString())}\n\n— ${sw.elapsed.inMilliseconds} ms total · ${_fmtStats(stats)}';
+      final stats = await c.runBenchmark(onText: (t) {
+        if (mounted) setState(() => _benchmark = t);
+      });
+      final text = (stats.remove('text') as String?) ?? '';
+      final elapsed = stats.remove('elapsed_ms');
+      _benchmark = '${stripThinking(text)}\n\n— $elapsed ms total · ${_fmtStats(stats)}';
     } catch (e) {
       _benchmark = 'Benchmark gagal: $e';
     } finally {
@@ -106,13 +99,95 @@ class _ModelManagerScreenState extends State<ModelManagerScreen> {
     }
   }
 
-  /// "CPU 4 thread" atau "GPU Vulkan · 36 layer" dari model yang dimuat; bila
-  /// belum dimuat, dari setelan yang akan dipakai saat memuat.
+  AutoTuneResult? _autoTune;
+  final _autoTuneAttempts = <AutoTuneAttempt>[];
+
+  Future<void> _runAutoTune() async {
+    final warning = c.memoryWarningForActiveModel();
+    if (warning != null) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('RAM tidak cukup'),
+          content: Text('$warning\n\nUji otomatis memuat model tiga kali.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Batal')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Tetap uji')),
+          ],
+        ),
+      );
+      if (proceed != true || !mounted) return;
+    }
+    setState(() {
+      _autoTune = null;
+      _autoTuneAttempts.clear();
+    });
+    try {
+      final result = await c.autoTune(onAttempt: (a) {
+        if (mounted) setState(() => _autoTuneAttempts.add(a));
+      });
+      if (!mounted) return;
+      setState(() => _autoTune = result);
+      final best = result.best;
+      if (result.cancelled) {
+        _toast('Uji otomatis dibatalkan.');
+      } else if (best == null) {
+        _toast('Semua percobaan gagal; setelan tidak diubah.', error: true);
+      } else {
+        _toast('Tercepat: ${best.preset.label} (${best.tokensPerSecond.toStringAsFixed(1)} tok/s), disimpan ke Pengaturan AI.');
+      }
+    } catch (e) {
+      if (mounted) _toast('Uji otomatis gagal: $e', error: true);
+    }
+  }
+
+  /// "CPU 4 thread", "OpenCL 37 layer" atau "OpenCL 18/36 layer + CPU 4 thread"
+  /// dari model yang dimuat; bila belum dimuat, dari setelan yang akan dipakai.
   String _backendLabel() {
     final m = c.engine.loadedModel;
-    if (m != null) return m.usesGpu ? 'GPU Vulkan · ${m.gpuLayers} layer' : 'CPU ${m.threads} thread';
+    if (m != null) return m.backendLabel;
     final s = c.settings;
-    return s.useGpu ? 'GPU Vulkan · ${s.gpuLayers >= AiSettings.allGpuLayers ? 'semua' : s.gpuLayers} layer (saat dimuat)' : 'CPU ${s.threads} thread';
+    if (!s.useGpu || s.gpuLayers <= 0) return 'CPU ${s.threads} thread';
+    final layers = s.gpuLayers >= AiSettings.allGpuLayers ? 'semua' : '${s.gpuLayers}';
+    return '${s.gpuBackend.label} $layers layer + CPU ${s.threads} thread (saat dimuat)';
+  }
+
+  Widget _autoTuneTable() {
+    final rows = [..._autoTuneAttempts];
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final best = _autoTune?.best;
+    String tps(AutoTuneAttempt a) => a.succeeded ? '${a.tokensPerSecond.toStringAsFixed(1)} tok/s' : 'gagal';
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: HqColors.background, borderRadius: BorderRadius.circular(8)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Uji otomatis (${_autoTune?.backend.label ?? c.settings.gpuBackend.label})', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          for (final a in rows)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  Icon(identical(a, best) ? Icons.star : (a.succeeded ? Icons.check : Icons.close), size: 14, color: identical(a, best) ? HqColors.local : HqColors.muted),
+                  const SizedBox(width: 6),
+                  Expanded(flex: 3, child: Text('${a.preset.label}${a.gpuLayers > 0 ? ' · ${a.gpuLayers} layer' : ''}', style: const TextStyle(fontSize: 12))),
+                  Expanded(flex: 2, child: Text(tps(a), style: const TextStyle(fontSize: 12))),
+                  Text('${(a.elapsed.inMilliseconds / 1000).toStringAsFixed(1)} s', style: const TextStyle(fontSize: 12, color: HqColors.muted)),
+                ],
+              ),
+            ),
+          if (rows.any((a) => !a.succeeded))
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(rows.where((a) => !a.succeeded).map((a) => '${a.preset.label}: ${a.error}').join('\n'), style: const TextStyle(fontSize: 10.5, color: HqColors.muted)),
+            ),
+        ],
+      ),
+    );
   }
 
   String _fmtStats(Map<String, Object?> s) {
@@ -170,6 +245,22 @@ class _ModelManagerScreenState extends State<ModelManagerScreen> {
                           const Expanded(child: Text('Catat hasilnya di docs/BENCHMARK.md (Fase 0).', style: TextStyle(fontSize: 11, color: HqColors.muted))),
                         ],
                       ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          if (c.autoTuning)
+                            OutlinedButton.icon(onPressed: c.cancelAutoTune, icon: const Icon(Icons.stop), label: const Text('Batalkan uji'))
+                          else
+                            OutlinedButton.icon(
+                              onPressed: m.activeModelPath == null || _benchmarking || _loading || state == LocalEngineState.loading ? null : _runAutoTune,
+                              icon: const Icon(Icons.auto_fix_high),
+                              label: const Text('Uji otomatis'),
+                            ),
+                          const SizedBox(width: 10),
+                          const Expanded(child: Text('Memuat model 3× (CPU / seimbang / GPU penuh), memilih yang tercepat dan menyimpannya.', style: TextStyle(fontSize: 11, color: HqColors.muted))),
+                        ],
+                      ),
+                      _autoTuneTable(),
                       if (_benchmark != null) ...[
                         const SizedBox(height: 8),
                         Container(

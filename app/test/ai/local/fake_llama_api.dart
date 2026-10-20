@@ -72,30 +72,44 @@ class FakeLlamaApi implements LlamaNativeApi {
   int? _errorAfter;
 
   int _gpuLayers = 0;
+  int _backend = 0;
   int _lastRequestedGpuLayers = 0;
+  int _lastRequestedBackend = 0;
   int _gpuInfoCalls = 0;
+  String? _cacheDir;
+  int _setCacheDirCalls = 0;
 
   @override
-  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch, int nGpuLayers = 0}) {
+  void load(
+    String modelPath, {
+    required int nCtx,
+    required int nThreads,
+    required int nBatch,
+    int nGpuLayers = 0,
+    int backend = 0,
+  }) {
     _lastRequestedGpuLayers = nGpuLayers;
+    _lastRequestedBackend = backend;
     if (modelPath == failingModelPath) {
       _lastError = 'llama_model_load_from_file failed';
       throw LlamaNativeException(-2, _lastError);
     }
     if (modelPath == gpuUnavailableModelPath && nGpuLayers > 0) {
-      _lastError = 'no Vulkan GPU device (driver missing or Vulkan < 1.2)';
+      _lastError = backend == 2 ? 'opencl: Driver OpenCL tidak ditemukan' : 'vulkan: no Vulkan GPU device (driver missing or Vulkan < 1.2)';
       throw LlamaNativeException(-11, _lastError);
     }
     _loaded = true;
     // Seperti shim C: >= 99 berarti semua layer; llama memakai min(n, n_layer + 1).
     final wanted = nGpuLayers >= 99 || nGpuLayers < 0 ? 999 : nGpuLayers;
-    _gpuLayers = wanted > fakeModelLayers + 1 ? fakeModelLayers + 1 : wanted;
+    _gpuLayers = backend == 0 ? 0 : (wanted > fakeModelLayers + 1 ? fakeModelLayers + 1 : wanted);
+    _backend = _gpuLayers > 0 ? backend : 0;
   }
 
   @override
   void unload() {
     _loaded = false;
     _gpuLayers = 0;
+    _backend = 0;
     _unloadCalls++;
   }
 
@@ -106,8 +120,31 @@ class FakeLlamaApi implements LlamaNativeApi {
   int get gpuLayers => _loaded ? _gpuLayers : 0;
 
   @override
-  Map<String, Object?> gpuInfo() {
+  int get gpuBackend => _loaded ? _backend : 0;
+
+  @override
+  int get modelLayers => _loaded ? fakeModelLayers : 0;
+
+  @override
+  void setCacheDir(String? dir) {
+    _cacheDir = dir;
+    _setCacheDirCalls++;
+  }
+
+  @override
+  Map<String, Object?> gpuInfo(int backend) {
     _gpuInfoCalls++;
+    if (backend == 2) {
+      return {
+        'available': true,
+        'backend': 'opencl',
+        'device': 'Fake Mali',
+        'vram_mb': 7812,
+        'integrated': true,
+        'api_version': 'OpenCL 3.0',
+        'reason': '',
+      };
+    }
     return {
       'available': true,
       'backend': 'vulkan',
@@ -171,6 +208,9 @@ class FakeLlamaApi implements LlamaNativeApi {
         'start_calls': _startCalls,
         'unload_calls': _unloadCalls,
         'requested_gpu_layers': _lastRequestedGpuLayers,
+        'requested_backend': _lastRequestedBackend,
         'gpu_info_calls': _gpuInfoCalls,
+        'cache_dir': _cacheDir,
+        'set_cache_dir_calls': _setCacheDirCalls,
       };
 }
