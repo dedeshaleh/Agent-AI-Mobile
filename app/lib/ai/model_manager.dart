@@ -74,6 +74,14 @@ const kModelCatalog = [
     note: 'Default. Ringan dan cepat untuk ponsel 8 GB.',
   ),
   ModelCatalogEntry(
+    id: 'qwen3.5-2b-q4_k_m',
+    name: 'Qwen3.5 2B (Q4_K_M)',
+    sizeBytes: 1280835840,
+    url: 'https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf',
+    contextDefault: 2048,
+    note: 'Generasi baru; kualitas mendekati 4B dengan RAM ±1,3 GB. Teks saja (mmproj tidak dipakai).',
+  ),
+  ModelCatalogEntry(
     id: 'qwen3-4b-q4_k_m',
     name: 'Qwen3 4B (Q4_K_M)',
     sizeBytes: 2500000000,

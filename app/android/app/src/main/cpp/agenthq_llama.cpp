@@ -117,14 +117,8 @@ void backend_init_once() {
         // Read by the patched ggml-vulkan.cpp (cmake/patch-ggml-vulkan.cmake).
         setenv("GGML_VK_DISABLE_BDA", "1", 0);
 #if defined(AGENTHQ_HAVE_OPENCL) && defined(__ANDROID__)
-        // The statically linked Khronos ICD loader looks for .icd files in
-        // /system/vendor/Khronos/OpenCL/vendors (absent on most phones) and for the
-        // colon-separated OCL_ICD_FILENAMES list. The bare soname is resolved by the
-        // Android linker through the vendor namespace because libOpenCL.so is listed
-        // in /vendor/etc/public.libraries.txt; an absolute /vendor/lib64 path would be
-        // rejected by the app's linker namespace. Must run before the first CL call
-        // (the loader enumerates vendors once, and ggml caches its device probe).
-        setenv("OCL_ICD_FILENAMES", "libOpenCL.so", 0);
+        // The OpenCL entry points are trampolines in cl_shim.cpp that dlopen the vendor
+        // libOpenCL.so on first use (no ICD loader, no env needed).
         // Without a cache dir ggml tries std::filesystem::temp_directory_path(), which
         // is /tmp on Bionic and does not exist -> cache silently disabled.
         if (getenv("GGML_OPENCL_KERNEL_CACHE_DIR") == nullptr) setenv("GGML_OPENCL_KERNEL_CACHE_DIR", "off", 0);
@@ -205,11 +199,17 @@ const char* backend_name(int backend) {
     }
 }
 
-// OpenCL driver probe through the ICD loader (no ggml involved): number of
-// platforms, and the first GPU device's CL_DEVICE_VERSION ("OpenCL 3.0 ...")
-// trimmed to "OpenCL X.Y". 0 platforms = no vendor library could be loaded.
+#ifdef AGENTHQ_HAVE_OPENCL
+extern "C" int agenthq_cl_driver_loaded(void);  // cl_shim.cpp
+#endif
+
+// OpenCL driver probe through the cl_shim trampolines (no ggml involved): number
+// of platforms, and the first GPU device's CL_DEVICE_VERSION ("OpenCL 3.0 ...")
+// trimmed to "OpenCL X.Y". 0 platforms = no vendor library could be dlopen()ed
+// or it reports no platform.
 unsigned opencl_platform_count(std::string* version_out) {
 #ifdef AGENTHQ_HAVE_OPENCL
+    if (!agenthq_cl_driver_loaded()) return 0;
     cl_uint n = 0;
     if (clGetPlatformIDs(0, nullptr, &n) != CL_SUCCESS) return 0;
     if (version_out && n > 0) {

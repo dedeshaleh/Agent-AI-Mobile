@@ -19,14 +19,13 @@ set(AGENTHQ_VULKAN_HEADERS_TAG "v1.4.363"             CACHE STRING "KhronosGroup
 set(AGENTHQ_SPIRV_HEADERS_TAG  "vulkan-sdk-1.4.363.0" CACHE STRING "KhronosGroup/SPIRV-Headers tag (spirv/unified1/spirv.hpp)")
 
 # Optional second GPU backend (ggml OpenCL) for GPUs whose Vulkan driver is too old
-# for ggml-vulkan (Mali-G610 on the Infinix X6871 reports Vulkan 1.1). Headers and the
-# Khronos ICD loader are fetched and the loader is linked *statically*, so the .so has
-# no NEEDED on libOpenCL.so; the loader dlopen()s the vendor driver at runtime
-# (agenthq_llama.cpp sets OCL_ICD_FILENAMES=libOpenCL.so). Needs python3 on the host
-# for ggml's kernel embedding script.
+# for ggml-vulkan (Mali-G610 on the Infinix X6871 reports Vulkan 1.1). Headers are
+# fetched; the "library" is cl_shim.cpp (static trampolines that dlopen the vendor
+# driver on first use), so the .so has no NEEDED on libOpenCL.so. The Khronos ICD loader
+# was tried first and dropped: the Mali driver lacks clIcdGetPlatformIDsKHR. Needs
+# python3 on the host for ggml's kernel embedding script.
 option(AGENTHQ_GPU_OPENCL "Build the ggml OpenCL backend into libagenthq_llama.so" ON)
 set(AGENTHQ_OPENCL_HEADERS_TAG "v2026.05.29" CACHE STRING "KhronosGroup/OpenCL-Headers tag")
-set(AGENTHQ_OPENCL_LOADER_TAG  "v2026.05.29" CACHE STRING "KhronosGroup/OpenCL-ICD-Loader tag")
 
 set(BUILD_SHARED_LIBS      OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP            OFF CACHE BOOL "" FORCE)
@@ -177,21 +176,21 @@ elseif (AGENTHQ_GPU_OPENCL)
       GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-Headers.git
       GIT_TAG        ${AGENTHQ_OPENCL_HEADERS_TAG}
       GIT_SHALLOW    TRUE)
-    FetchContent_Declare(opencl_icd_loader
-      GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-ICD-Loader.git
-      GIT_TAG        ${AGENTHQ_OPENCL_LOADER_TAG}
-      GIT_SHALLOW    TRUE)
     FetchContent_Populate(opencl_headers)
     set(AGENTHQ_OPENCL_INCLUDE_DIR "${opencl_headers_SOURCE_DIR}" CACHE INTERNAL "OpenCL-Headers include dir (CL/cl.h)")
 
-    # Static ICD loader: target `OpenCL` (+ alias OpenCL::OpenCL). No layers/tools/tests.
-    set(OPENCL_ICD_LOADER_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    set(OPENCL_ICD_LOADER_BUILD_TESTING     OFF CACHE BOOL "" FORCE)
-    set(OPENCL_ICD_LOADER_PIC               ON  CACHE BOOL "" FORCE)
-    set(ENABLE_OPENCL_LAYERS                OFF CACHE BOOL "" FORCE)
-    set(ENABLE_OPENCL_LAYERINFO             OFF CACHE BOOL "" FORCE)
-    set(OPENCL_ICD_LOADER_HEADERS_DIR "${AGENTHQ_OPENCL_INCLUDE_DIR}" CACHE PATH "" FORCE)
-    FetchContent_MakeAvailable(opencl_icd_loader)
+    # Direct-binding shim (cl_shim.cpp): trampolines that dlopen the vendor
+    # libOpenCL.so on first use. Replaces the Khronos ICD loader, which needs the
+    # driver to export clIcdGetPlatformIDsKHR (the Mali driver on the X6871 does not).
+    add_library(agenthq_cl_shim STATIC cl_shim.cpp)
+    target_include_directories(agenthq_cl_shim PUBLIC ${AGENTHQ_OPENCL_INCLUDE_DIR})
+    target_compile_options(agenthq_cl_shim PRIVATE -Wall -Wextra -Wno-deprecated-declarations)
+    set_target_properties(agenthq_cl_shim PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(agenthq_cl_shim PUBLIC ${CMAKE_DL_LIBS})
+    if (ANDROID)
+      target_link_libraries(agenthq_cl_shim PUBLIC log)
+    endif()
+    add_library(OpenCL::OpenCL ALIAS agenthq_cl_shim)
 
     # ggml-opencl's find_package(OpenCL REQUIRED) is answered by cmake/modules/FindOpenCL.cmake.
     list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules")
@@ -201,7 +200,7 @@ elseif (AGENTHQ_GPU_OPENCL)
     set(GGML_OPENCL_USE_ADRENO_BIN_KERNELS OFF CACHE BOOL "" FORCE)
     set(GGML_OPENCL_PROFILING          OFF CACHE BOOL "" FORCE)
     set(AGENTHQ_GPU_OPENCL_ENABLED ON)
-    message(STATUS "agenthq: GGML_OPENCL=ON (headers: ${AGENTHQ_OPENCL_INCLUDE_DIR}; static ICD loader; python: ${Python3_EXECUTABLE})")
+    message(STATUS "agenthq: GGML_OPENCL=ON (headers: ${AGENTHQ_OPENCL_INCLUDE_DIR}; direct-binding cl_shim; python: ${Python3_EXECUTABLE})")
   else()
     set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
   endif()
@@ -253,7 +252,7 @@ endif()
 if (AGENTHQ_GPU_OPENCL_ENABLED)
   # The shim calls clGetPlatformIDs/clGetDeviceInfo itself (driver probe for gpu_info).
   target_compile_definitions(agenthq_llama PRIVATE AGENTHQ_HAVE_OPENCL=1 CL_TARGET_OPENCL_VERSION=300)
-  target_link_libraries(agenthq_llama PRIVATE OpenCL)
+  target_link_libraries(agenthq_llama PRIVATE agenthq_cl_shim)
 endif()
 if (ANDROID)
   target_link_libraries(agenthq_llama PRIVATE log)

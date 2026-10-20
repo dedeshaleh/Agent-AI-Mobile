@@ -133,7 +133,7 @@ void main() {
     expect(mm.activeModelPath, isNull);
   });
 
-  test('katalog bawaan berisi Qwen3 1.7B dan 4B', () {
-    expect(kModelCatalog.map((c) => c.fileName), ['Qwen3-1.7B-Q4_K_M.gguf', 'Qwen3-4B-Q4_K_M.gguf']);
+  test('katalog bawaan berisi Qwen3 1.7B, Qwen3.5 2B, dan Qwen3 4B', () {
+    expect(kModelCatalog.map((c) => c.fileName), ['Qwen3-1.7B-Q4_K_M.gguf', 'Qwen3.5-2B-Q4_K_M.gguf', 'Qwen3-4B-Q4_K_M.gguf']);
   });
 }

@@ -23,19 +23,35 @@ library, `libagenthq_llama.so`, with llama/ggml linked statically. Dart talks to
 - **GPU, OpenCL** (`AGENTHQ_GPU_OPENCL=ON`, default): ggml-opencl for GPUs whose Vulkan
   driver is < 1.2 (Mali-G610 on the Infinix X6871 reports 1.1). No NDK OpenCL SDK exists, so:
   - Headers: FetchContent `KhronosGroup/OpenCL-Headers` (`AGENTHQ_OPENCL_HEADERS_TAG`).
-  - Library: FetchContent `KhronosGroup/OpenCL-ICD-Loader` (`AGENTHQ_OPENCL_LOADER_TAG`) built
-    as a **static** lib (`OPENCL_ICD_LOADER_BUILD_SHARED_LIBS=OFF`, layers/tools/tests off) and
-    linked into `libagenthq_llama.so`; `cmake/modules/FindOpenCL.cmake` answers ggml's
-    `find_package(OpenCL REQUIRED)` with that target. Result: **no `NEEDED libOpenCL.so`**, the
-    `.so` loads on devices without a driver, and `cl*` symbols are hidden (`--exclude-libs,ALL`).
-  - Runtime discovery: the loader reads `.icd` files from `/system/vendor/Khronos/OpenCL/vendors`
-    (absent on most phones) and the `OCL_ICD_FILENAMES` env (colon-separated libraries to
-    `dlopen`, see `loader/icd.c`). `agenthq_llama.cpp` sets `OCL_ICD_FILENAMES=libOpenCL.so`
-    in `backend_init_once()` before any CL call. The bare soname is used on purpose: the vendor
-    driver is listed in `/vendor/etc/public.libraries.txt`, so the app linker namespace
-    resolves `libOpenCL.so` via the vendor namespace, while an absolute `/vendor/lib64/...`
-    path is rejected ("not accessible for the namespace"). No `.icd` file is written. The
-    driver must expose `cl_khr_icd` (`clIcdGetPlatformIDsKHR`); ARM Mali drivers do.
+  - Library: `cl_shim.cpp`, a static lib (`agenthq_cl_shim`) of **direct-binding
+    trampolines**: every `cl*` function ggml-opencl b11727 references (35, found with
+    `llvm-nm -u` on the ggml-opencl objects: clGetPlatformIDs/Info, clGetDeviceIDs/Info,
+    clCreateContext, clCreateCommandQueue, clCreate{Buffer,BufferWithProperties,SubBuffer,
+    Image,ProgramWithSource,ProgramWithBinary,Kernel}, clBuildProgram, clGetProgram{Info,
+    BuildInfo}, clGetKernel{WorkGroup,SubGroup}Info, clSetKernelArg, clEnqueue{NDRangeKernel,
+    ReadBuffer,WriteBuffer,CopyBuffer,FillBuffer,MapBuffer,UnmapMemObject,
+    MarkerWithWaitList,BarrierWithWaitList}, clFlush, clFinish, clWaitForEvents,
+    clRelease{Event,Kernel,MemObject,Program}) plus clReleaseContext, clReleaseCommandQueue,
+    clGetEventProfilingInfo (38 total). On first call the shim `dlopen`s, in order,
+    `libOpenCL.so`, `/vendor/lib64/libOpenCL.so`, `/system/vendor/lib64/libOpenCL.so`,
+    `/system/lib64/libOpenCL.so` (`RTLD_NOW|RTLD_LOCAL`), logs the path that worked (tag
+    `agenthq_llama`) and `dlsym`s each function lazily. Missing library or symbol → the
+    trampoline returns an OpenCL error (`CL_PLATFORM_NOT_FOUND_KHR` for clGetPlatformIDs,
+    `CL_DEVICE_NOT_FOUND`, `CL_INVALID_*`, NULL + `*errcode_ret` for creators); nothing
+    crashes and `agenthq_gpu_info(2)` reports "Driver OpenCL tidak ditemukan".
+    `cmake/modules/FindOpenCL.cmake` answers ggml's `find_package(OpenCL REQUIRED)` with the
+    shim target. Result: **no `NEEDED libOpenCL.so`**, the `.so` loads on devices without a
+    driver, and `cl*` symbols are hidden (`--exclude-libs,ALL`).
+  - Why not the Khronos ICD loader (first attempt): it requires the driver to export the
+    `cl_khr_icd` entry point via `clGetExtensionFunctionAddress("clIcdGetPlatformIDsKHR")`.
+    The Mali driver on the Infinix X6871 (`/vendor/lib64/libOpenCL.so`, 72 KB, 136 exported
+    `cl*` functions) does not provide it, so the loader found no vendor and ggml logged
+    "platform IDs not available". Direct binding to the exported functions needs nothing
+    from the driver beyond the plain OpenCL API.
+  - The bare soname is tried first on purpose: the vendor driver is listed in
+    `/vendor/etc/public.libraries.txt`, so the app linker namespace resolves `libOpenCL.so`
+    via the vendor namespace, while absolute `/vendor/lib64/...` paths may be rejected
+    ("not accessible for the namespace"); they are kept as fallbacks only.
   - 64-bit only: ggml-opencl b11727 does not compile for armeabi-v7a (int64 → size_t
     narrowing errors), so the CMake skips it when `CMAKE_SIZEOF_VOID_P != 8`; the debug
     Gradle build still configures v7a/x86_64 and those get CPU(+Vulkan) only.
@@ -53,8 +69,9 @@ library, `libagenthq_llama.so`, with llama/ggml linked statically. Dart talks to
   - Device selection never touches the global ggml registry (that would initialise every
     backend, and ggml-vulkan crashes on 1.1 drivers): `find_backend_device()` uses
     `ggml_backend_vk_reg()` / `ggml_backend_opencl_reg()` directly and passes
-    `llama_model_params.devices = {dev, NULL}`. The shim also calls `clGetPlatformIDs` itself
-    (through the static loader) to distinguish "no driver" from "ggml rejected the device".
+    `llama_model_params.devices = {dev, NULL}`. The shim also asks `cl_shim.cpp` whether the
+    driver was dlopen()ed (`agenthq_cl_driver_loaded()`) and calls `clGetPlatformIDs` itself
+    to distinguish "no driver" from "ggml rejected the device".
 - Vulkan build inputs (no Vulkan SDK on this PC):
   - `vulkan.hpp` + recent `vulkan_core.h`: FetchContent `KhronosGroup/Vulkan-Headers`
     (`AGENTHQ_VULKAN_HEADERS_TAG`); the NDK sysroot only has C headers at header version 275.
@@ -106,7 +123,7 @@ $out = "$env:TEMP\agenthq-native\build-arm64"                                  #
 
 To reuse an existing checkout instead of cloning, add
 `-DFETCHCONTENT_SOURCE_DIR_LLAMA_CPP=<path to llama.cpp at b11727>` (and likewise
-`..._OPENCL_HEADERS`, `..._OPENCL_ICD_LOADER`, `..._VULKAN_HEADERS`, `..._SPIRV_HEADERS`).
+`..._OPENCL_HEADERS`, `..._VULKAN_HEADERS`, `..._SPIRV_HEADERS`).
 With a reused llama.cpp checkout FetchContent skips `PATCH_COMMAND`, so run the patch scripts
 by hand first: `cmake -DSRC=<llama.cpp> -P cmake/patch-ggml-vulkan.cmake` and
 `... -P cmake/patch-ggml-opencl.cmake` (both idempotent).
