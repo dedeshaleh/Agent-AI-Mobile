@@ -1,12 +1,19 @@
-# Applied to the fetched llama.cpp sources (FetchContent PATCH_COMMAND). Idempotent.
+# Applied to the fetched llama.cpp sources (FetchContent PATCH_COMMAND). Idempotent
+# per hunk: a hunk whose replacement text is already present is skipped.
 #
 # ggml-opencl (b11727) was written for Qualcomm Adreno and Intel GPUs and
 #   (1) drops every other device in ggml_opencl_is_device_supported(), so a Mali
 #       GPU would never appear in the registry,
 #   (2) exit(1)s while loading the gated_delta_net kernels when the GPU family is
 #       neither Adreno nor Intel (those kernels are only used by Qwen3-Next style
-#       models), and
-#   (3) exit(1)s the whole process when any embedded kernel fails to compile.
+#       models),
+#   (3) exit(1)s the whole process when any embedded kernel fails to compile, and
+#   (4) its kernels only define N_SIMDWIDTH/N_DST/REQD_SUBGROUP_SIZE_* when the
+#       compiler advertises cl_intel_required_subgroup_size or
+#       cl_qcom_reqd_sub_group_size, so on Mali every kernel fails with
+#       "use of undeclared identifier 'N_SIMDGROUP'". Mali (Valhall) subgroups are
+#       16 wide like Intel's, so the Intel variants are selected via -D flags with
+#       the Intel-only attribute macros defined empty.
 # For an app, (2)/(3) must become recoverable errors: they are turned into
 # C++ exceptions that propagate out of llama_model_load_from_file /
 # llama_init_from_model into agenthq_llama.cpp, which answers
@@ -22,14 +29,15 @@ if (NOT EXISTS "${_file}")
 endif()
 file(READ "${_file}" _content)
 
-string(FIND "${_content}" "agenthq patch" _already)
-if (_already GREATER -1)
-  message(STATUS "agenthq: ggml-opencl patch already applied")
-  return()
-endif()
-
 set(_n_applied 0)
+set(_n_skipped 0)
 function(_agenthq_replace needle replacement what)
+  string(FIND "${_content}" "${replacement}" _done)
+  if (_done GREATER -1)
+    math(EXPR _s "${_n_skipped} + 1")
+    set(_n_skipped "${_s}" PARENT_SCOPE)
+    return()
+  endif()
   string(FIND "${_content}" "${needle}" _pos)
   if (_pos EQUAL -1)
     message(WARNING "agenthq: ggml-opencl patch anchor not found (${what}); llama.cpp tag changed? OpenCL on Mali may not work.")
@@ -69,9 +77,20 @@ _agenthq_replace(
   "        clReleaseProgram(p);\n        if (fatal) {\n            throw std::runtime_error(std::string(\"ggml_opencl: kernel compile failed\") + (tag ? std::string(\" (\") + tag + \")\" : \"\")); // agenthq patch\n        }\n        return nullptr;"
   "compile error exit")
 
+# (4) unknown GPU family (Mali): compile the Intel (16-wide subgroup) kernel variants.
+set(_generic_defs "    if (backend_ctx->gpu_family == GPU_FAMILY::UNKNOWN) {\n        // agenthq patch: Mali/other 16-wide-subgroup GPUs use the Intel kernel variants;\n        // the Intel-only required-subgroup-size attributes are defined empty.\n        compile_opts += \" -DINTEL_GPU=1 -DREQD_SUBGROUP_SIZE_16= -DREQD_SUBGROUP_SIZE_32=\";\n    }\n")
+_agenthq_replace(
+  "    if (backend_ctx->adreno_use_large_buffer) {\n        compile_opts += \" -qcom-enable-large-buffer \";\n    }\n\n    return compile_opts;"
+  "    if (backend_ctx->adreno_use_large_buffer) {\n        compile_opts += \" -qcom-enable-large-buffer \";\n    }\n${_generic_defs}\n    return compile_opts;"
+  "generic family compile opts")
+_agenthq_replace(
+  "                               \" -cl-finite-math-only -cl-fast-relaxed-math\";\n\n    // argsort\n"
+  "                               \" -cl-finite-math-only -cl-fast-relaxed-math\";\n${_generic_defs}\n    // argsort\n"
+  "generic family compile opts (argsort)")
+
 if (_n_applied EQUAL 0)
-  message(WARNING "agenthq: no ggml-opencl patch hunk applied")
+  message(STATUS "agenthq: ggml-opencl patch: nothing to do (${_n_skipped} hunks already applied)")
   return()
 endif()
 file(WRITE "${_file}" "${_content}")
-message(STATUS "agenthq: ggml-opencl patch applied (${_n_applied}/5 hunks) to ${_file}")
+message(STATUS "agenthq: ggml-opencl patch applied (${_n_applied} new, ${_n_skipped} already present) to ${_file}")

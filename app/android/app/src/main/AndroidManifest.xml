@@ -10,6 +10,10 @@
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules">
+        <!-- Apps targeting API 31+ may only dlopen vendor public libraries they declare here.
+             libOpenCL.so is the GPU driver used by the optional ggml OpenCL backend;
+             required="false" keeps the app installable on devices without it. -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
