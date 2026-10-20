@@ -695,3 +695,24 @@ int agenthq_stats(double* load_ms, double* prompt_tokens_per_s, double* gen_toke
 }
 
 }  // extern "C"
+
+// --- bridge for agenthq_selftest.cpp (agenthq_internal.h) -------------------
+
+ggml_backend_dev_t agenthq_internal_find_device(int backend, std::string& reason) {
+    backend_init_once();
+    if (backend == AGENTHQ_BACKEND_VULKAN) {
+        const uint32_t vk_version = vulkan_device_api_version();
+        if (vk_version == 0) { reason = "Tidak ada driver Vulkan yang bisa dipakai"; return nullptr; }
+        if (vk_version < VK_API_VERSION_1_2) {
+            reason = "Vulkan " + vulkan_version_string(vk_version) + " (ggml butuh 1.2)";
+            return nullptr;
+        }
+    } else if (backend == AGENTHQ_BACKEND_OPENCL) {
+        if (opencl_platform_count(nullptr) == 0) { reason = "Driver OpenCL tidak ditemukan"; return nullptr; }
+    }
+    return find_backend_device(backend, reason);
+}
+
+void agenthq_internal_set_error(const std::string& msg) { set_error(msg); }
+
+void agenthq_internal_json_escape(const char* in, std::string& out) { json_escape(in, out); }

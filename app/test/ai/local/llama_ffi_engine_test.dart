@@ -132,6 +132,35 @@ void main() {
     });
   });
 
+  group('gpuSelfTest', () {
+    test('runs through the isolate and parses the per-op report', () async {
+      final report = await engine.gpuSelfTest(LocalGpuBackend.opencl);
+      expect(report.available, isTrue);
+      expect(report.device, 'Fake Mali');
+      expect(report.checks, hasLength(3));
+      expect(report.checks[0].status, 'OK');
+      expect(report.checks[0].nmseLabel, 'nmse 1,0e-5');
+      expect(report.checks[1].status, 'SALAH');
+      expect(report.checks[2].status, 'CPU');
+      expect(report.okCount, 1);
+      expect(report.wrongCount, 1);
+      expect(report.cpuCount, 1);
+      expect(report.allOk, isFalse);
+      expect(report.runtimeSubgroups, {64: 16, 256: 16});
+      expect(report.summary, '1/3 OK · 1 salah · 1 di CPU · subgroup 16');
+
+      final vk = await engine.gpuSelfTest(LocalGpuBackend.vulkan);
+      expect(vk.available, isFalse);
+      expect(vk.summary, 'Vulkan 1.1 (ggml butuh 1.2)');
+
+      final cpu = await engine.gpuSelfTest(LocalGpuBackend.cpu);
+      expect(cpu.available, isFalse);
+
+      await engine.load('/models/qwen.gguf');
+      expect(engine.lastStats['self_test_calls'], 2);
+    });
+  });
+
   group('gpuInfo', () {
     test('works through the isolate before any model is loaded and reports both backends', () async {
       final report = await engine.gpuInfo();

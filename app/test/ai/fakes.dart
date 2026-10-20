@@ -83,6 +83,9 @@ class FakeLocalEngine implements LocalEngine {
   Future<LocalGpuReport> gpuInfo() async => gpuReport;
 
   @override
+  Future<GpuSelfTestReport> gpuSelfTest(LocalGpuBackend backend) async => const GpuSelfTestReport(reason: 'palsu');
+
+  @override
   Future<void> unload() async => state = LocalEngineState.unloaded;
 
   @override

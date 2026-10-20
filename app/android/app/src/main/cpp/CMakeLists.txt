@@ -242,7 +242,7 @@ if (AGENTHQ_GPU_VULKAN_ENABLED AND TARGET ggml-vulkan)
 endif()
 
 # --- shim -------------------------------------------------------------------
-add_library(agenthq_llama SHARED agenthq_llama.cpp)
+add_library(agenthq_llama SHARED agenthq_llama.cpp agenthq_selftest.cpp)
 target_include_directories(agenthq_llama PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(agenthq_llama PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(agenthq_llama PRIVATE llama ggml)

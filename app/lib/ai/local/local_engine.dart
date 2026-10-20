@@ -186,6 +186,109 @@ class LocalGpuReport {
       vulkan.available ? LocalGpuBackend.vulkan : (opencl.available ? LocalGpuBackend.opencl : null);
 }
 
+/// Hasil satu op pada uji kernel GPU (`agenthq_gpu_selftest`).
+class GpuKernelCheck {
+  const GpuKernelCheck({
+    required this.op,
+    required this.ok,
+    this.supported = true,
+    this.nmse,
+    this.tolerance = 0,
+    this.gpuMs = 0,
+    this.cpuMs = 0,
+    this.error = '',
+  });
+  final String op;
+
+  /// Hasil GPU sama dengan CPU dalam toleransi.
+  final bool ok;
+
+  /// false = backend GPU tidak mendukung op ini (ggml menjalankannya di CPU).
+  final bool supported;
+
+  /// Normalised mean squared error vs CPU; null bila tidak bisa dihitung.
+  final double? nmse;
+  final double tolerance;
+  final double gpuMs;
+  final double cpuMs;
+  final String error;
+
+  factory GpuKernelCheck.fromJson(Map<String, Object?> j) => GpuKernelCheck(
+        op: (j['op'] as String?) ?? '?',
+        ok: j['ok'] == true,
+        supported: j['supported'] != false,
+        nmse: (j['nmse'] as num?)?.toDouble(),
+        tolerance: (j['tol'] as num?)?.toDouble() ?? 0,
+        gpuMs: (j['gpu_ms'] as num?)?.toDouble() ?? 0,
+        cpuMs: (j['cpu_ms'] as num?)?.toDouble() ?? 0,
+        error: (j['error'] as String?) ?? '',
+      );
+
+  /// "OK", "SALAH" (hasil beda), "gagal" (error) atau "CPU" (tidak didukung GPU).
+  String get status => !supported ? 'CPU' : (error.isNotEmpty ? 'gagal' : (ok ? 'OK' : 'SALAH'));
+
+  /// Mis. "nmse 1,2e-5" atau "–".
+  String get nmseLabel => nmse == null ? '–' : 'nmse ${nmse!.toStringAsExponential(1).replaceAll('.', ',')}';
+}
+
+/// Laporan uji kernel GPU: op mana yang hasilnya benar di GPU, plus ukuran
+/// subgroup yang benar-benar dipakai driver OpenCL.
+class GpuSelfTestReport {
+  const GpuSelfTestReport({
+    this.available = false,
+    this.backend = 'opencl',
+    this.device = '',
+    this.reason = '',
+    this.subgroup = const {},
+    this.checks = const [],
+  });
+  final bool available;
+  final String backend;
+  final String device;
+  final String reason;
+
+  /// `{"max_wg":1024,"kernel_wg":1024,"ndrange":{"16":16,...},"runtime":{"64":16,...},"error":""}`.
+  final Map<String, Object?> subgroup;
+  final List<GpuKernelCheck> checks;
+
+  factory GpuSelfTestReport.fromJson(Map<String, Object?> j) => GpuSelfTestReport(
+        available: j['available'] == true,
+        backend: (j['backend'] as String?) ?? 'opencl',
+        device: (j['device'] as String?) ?? '',
+        reason: (j['reason'] as String?) ?? '',
+        subgroup: (j['subgroup'] is Map) ? (j['subgroup'] as Map).cast<String, Object?>() : const {},
+        checks: [
+          for (final t in (j['tests'] as List?) ?? const [])
+            if (t is Map) GpuKernelCheck.fromJson(t.cast<String, Object?>()),
+        ],
+      );
+
+  int get okCount => checks.where((c) => c.ok).length;
+  int get wrongCount => checks.where((c) => c.supported && c.error.isEmpty && !c.ok).length;
+  int get failedCount => checks.where((c) => c.supported && c.error.isNotEmpty).length;
+  int get cpuCount => checks.where((c) => !c.supported).length;
+  bool get allOk => available && checks.isNotEmpty && checks.every((c) => c.ok || !c.supported);
+
+  /// Ukuran subgroup yang dibaca dari kernel yang berjalan, mis. {64: 16, 256: 16}.
+  Map<int, int?> get runtimeSubgroups {
+    final raw = subgroup['runtime'];
+    if (raw is! Map) return const {};
+    return {for (final e in raw.entries) int.tryParse('${e.key}') ?? 0: (e.value as num?)?.toInt()};
+  }
+
+  /// Mis. "16/19 OK · 2 salah · 1 di CPU · subgroup 16".
+  String get summary {
+    if (!available) return reason.isEmpty ? 'GPU tidak tersedia' : reason;
+    final parts = ['$okCount/${checks.length} OK'];
+    if (wrongCount > 0) parts.add('$wrongCount salah');
+    if (failedCount > 0) parts.add('$failedCount gagal');
+    if (cpuCount > 0) parts.add('$cpuCount di CPU');
+    final sg = runtimeSubgroups.values.whereType<int>().toSet();
+    if (sg.isNotEmpty) parts.add('subgroup ${(sg.toList()..sort()).join('/')}');
+    return parts.join(' · ');
+  }
+}
+
 class LocalGenerateOptions {
   const LocalGenerateOptions({
     this.maxTokens = 256,
@@ -251,6 +354,12 @@ abstract class LocalEngine {
   /// Deteksi GPU (Vulkan dan OpenCL) lewat registry backend; tidak perlu model
   /// dimuat. Implementasi tanpa dukungan GPU mengembalikan [LocalGpuReport.none].
   Future<LocalGpuReport> gpuInfo() async => LocalGpuReport.none;
+
+  /// Uji kernel GPU [backend]: setiap op ggml dijalankan di CPU dan GPU dengan
+  /// input sama lalu dibandingkan. Beberapa detik; tidak memerlukan model.
+  /// Implementasi tanpa dukungan GPU mengembalikan laporan tidak tersedia.
+  Future<GpuSelfTestReport> gpuSelfTest(LocalGpuBackend backend) async =>
+      const GpuSelfTestReport(reason: 'Backend GPU tidak didukung runtime ini');
 
   /// Prompt sudah dalam format template model (mis. ChatML). Stream berisi
   /// potongan teks yang sudah di-batch (tiap 50–100 ms), bukan per token.

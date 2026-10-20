@@ -49,7 +49,8 @@ if (-not $SkipBuild) {
       foreach ($k in $stages.Keys) {
         if ($line -match "Task :app:$k" -and $stages[$k] -gt $pct) { $pct = $stages[$k]; Report "[1/4] Build APK $pct% ($k)" }
       }
-      if ($line -match 'Error:|error:|FAILED|Exception') { Write-Host $line; $failed = $true }
+      # Case-sensitive: compiler *warnings* mention "exception" too (-Wexceptions notes).
+      if ($line -cmatch 'Error:|error:|FAILED|BUILD FAILED') { Write-Host $line; $failed = $true }
       Add-Content -LiteralPath $log -Value $line
     }
   } finally { Pop-Location }

@@ -59,6 +59,11 @@ abstract class LlamaNativeApi {
   /// [backend] 1 = Vulkan, 2 = OpenCL. Tidak perlu model dimuat.
   Map<String, Object?> gpuInfo(int backend);
 
+  /// JSON `agenthq_gpu_selftest(backend)` yang sudah di-decode: `available`,
+  /// `backend`, `device`, `reason`, `subgroup`, `tests[]`. Membandingkan hasil
+  /// op ggml di CPU vs GPU; memakan beberapa detik. Tidak perlu model dimuat.
+  Map<String, Object?> gpuSelfTest(int backend);
+
   /// Menyiapkan satu sesi generate (reset KV, decode prompt, siapkan sampler).
   void start(
     String prompt, {
@@ -115,6 +120,7 @@ class LlamaNative implements LlamaNativeApi {
         _modelLayers = lib.lookupFunction<_IntC, _IntD>('agenthq_model_layers'),
         _setCacheDir = lib.lookupFunction<_SetStrC, _SetStrD>('agenthq_set_cache_dir'),
         _gpuInfo = lib.lookupFunction<_GpuInfoC, _GpuInfoD>('agenthq_gpu_info'),
+        _gpuSelfTest = lib.lookupFunction<_GpuInfoC, _GpuInfoD>('agenthq_gpu_selftest'),
         _start = lib.lookupFunction<_StartC, _StartD>('agenthq_start'),
         _next = lib.lookupFunction<_NextC, _NextD>('agenthq_next'),
         _stop = lib.lookupFunction<_VoidC, _VoidD>('agenthq_stop'),
@@ -143,6 +149,7 @@ class LlamaNative implements LlamaNativeApi {
   final _IntD _modelLayers;
   final _SetStrD _setCacheDir;
   final _GpuInfoD _gpuInfo;
+  final _GpuInfoD _gpuSelfTest;
   final _StartD _start;
   final _NextD _next;
   final _VoidD _stop;
@@ -193,11 +200,15 @@ class LlamaNative implements LlamaNativeApi {
   }
 
   @override
-  Map<String, Object?> gpuInfo(int backend) {
-    const cap = 512;
+  Map<String, Object?> gpuInfo(int backend) => _jsonCall(_gpuInfo, backend, 512);
+
+  @override
+  Map<String, Object?> gpuSelfTest(int backend) => _jsonCall(_gpuSelfTest, backend, 32 * 1024);
+
+  Map<String, Object?> _jsonCall(_GpuInfoD fn, int backend, int cap) {
     final buf = calloc<Uint8>(cap);
     try {
-      final n = _gpuInfo(backend, buf.cast<Utf8>(), cap);
+      final n = fn(backend, buf.cast<Utf8>(), cap);
       if (n < 0) throw LlamaNativeException(n, lastError());
       final decoded = jsonDecode(utf8.decode(buf.asTypedList(n)));
       return decoded is Map ? decoded.cast<String, Object?>() : const {};

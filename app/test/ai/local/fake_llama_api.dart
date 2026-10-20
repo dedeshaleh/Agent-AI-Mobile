@@ -131,6 +131,27 @@ class FakeLlamaApi implements LlamaNativeApi {
     _setCacheDirCalls++;
   }
 
+  int _selfTestCalls = 0;
+
+  @override
+  Map<String, Object?> gpuSelfTest(int backend) {
+    _selfTestCalls++;
+    return {
+      'available': backend == 2,
+      'backend': backend == 2 ? 'opencl' : 'vulkan',
+      'device': backend == 2 ? 'Fake Mali' : '',
+      'reason': backend == 2 ? '' : 'Vulkan 1.1 (ggml butuh 1.2)',
+      'subgroup': {'max_wg': 1024, 'runtime': {'64': 16, '256': 16}, 'error': ''},
+      'tests': backend == 2
+          ? [
+              {'op': 'mul_mat q4_K', 'nmse': 1e-5, 'tol': 5e-4, 'ok': true, 'supported': true, 'gpu_ms': 1.0, 'cpu_ms': 3.0, 'error': ''},
+              {'op': 'rms_norm', 'nmse': 0.9, 'tol': 1e-5, 'ok': false, 'supported': true, 'gpu_ms': 0.2, 'cpu_ms': 0.1, 'error': ''},
+              {'op': 'group_norm', 'nmse': null, 'tol': 1e-5, 'ok': false, 'supported': false, 'gpu_ms': 0, 'cpu_ms': 0.1, 'error': 'tidak didukung'},
+            ]
+          : [],
+    };
+  }
+
   @override
   Map<String, Object?> gpuInfo(int backend) {
     _gpuInfoCalls++;
@@ -210,6 +231,7 @@ class FakeLlamaApi implements LlamaNativeApi {
         'requested_gpu_layers': _lastRequestedGpuLayers,
         'requested_backend': _lastRequestedBackend,
         'gpu_info_calls': _gpuInfoCalls,
+        'self_test_calls': _selfTestCalls,
         'cache_dir': _cacheDir,
         'set_cache_dir_calls': _setCacheDirCalls,
       };

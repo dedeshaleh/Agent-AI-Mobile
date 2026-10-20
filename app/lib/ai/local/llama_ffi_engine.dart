@@ -140,6 +140,13 @@ class LlamaFfiEngine implements LocalEngine {
   }
 
   @override
+  Future<GpuSelfTestReport> gpuSelfTest(LocalGpuBackend backend) async {
+    if (!backend.isGpu) return const GpuSelfTestReport(reason: 'Pilih backend GPU (Vulkan/OpenCL)');
+    final reply = await _send(_GpuSelfTestCmd(backend.nativeCode));
+    return GpuSelfTestReport.fromJson(reply.stats ?? const {});
+  }
+
+  @override
   Future<void> unload() async {
     if (_worker == null && _starting == null) {
       _loadedModel = null;
@@ -384,6 +391,11 @@ class _UnloadCmd extends _Cmd {}
 
 class _GpuInfoCmd extends _Cmd {}
 
+class _GpuSelfTestCmd extends _Cmd {
+  _GpuSelfTestCmd(this.backend);
+  final int backend;
+}
+
 class _GenerateCmd extends _Cmd {
   _GenerateCmd({
     required int id,
@@ -499,6 +511,8 @@ class _Worker {
 
           return {'vulkan': probe(LocalGpuBackend.vulkan), 'opencl': probe(LocalGpuBackend.opencl)};
         });
+      case _GpuSelfTestCmd c:
+        _reply(c.id, () => api.gpuSelfTest(c.backend));
       case _CancelCmd c:
         if (_generating == c.generationId) {
           _cancelRequested = true;

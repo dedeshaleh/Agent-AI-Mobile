@@ -124,6 +124,88 @@ _agenthq_replace(
   "sgs = AGENTHQ_GENERIC_GPU(backend_ctx) ? 16 : 32; // agenthq patch"
   "sgs = 32 sites")
 
+# (6) rms_norm_mul / rms_norm_mul_add size their per-subgroup scratch as `sgs` floats.
+#     That equals nth/sgs only for Intel (32 x 32 = 1024 threads); with 16-wide
+#     subgroups a 1024-thread group has 64 subgroups -> the kernel writes past the
+#     scratch buffer -> garbage activations (the Mali "random text" symptom).
+_agenthq_replace(
+  "sizeof(float)*sgs, NULL"
+  "sizeof(float)*((size_t) nth/sgs > sgs ? (size_t) nth/sgs : sgs), NULL /* agenthq patch: scratch per subgroup (a) */"
+  "rms_norm_mul_add scratch size")
+_agenthq_replace(
+  "sizeof(float)*sgs,     NULL"
+  "sizeof(float)*((size_t) nth/sgs > sgs ? (size_t) nth/sgs : sgs), NULL /* agenthq patch: scratch per subgroup (b) */"
+  "rms_norm_mul scratch size")
+
+# (7) the gated_delta_net kernels are skipped in (2), but supports_op still claimed
+#     the op, so ggml scheduled it on the GPU and the dispatcher hit
+#     GGML_ASSERT(kernel != nullptr) (SIGABRT with Qwen3.5, a Gated DeltaNet model).
+#     Decline the op so ggml runs it on the CPU.
+_agenthq_replace(
+  "        case GGML_OP_GATED_DELTA_NET:\n            {\n                // Match the Vulkan backend: only F32 -> F32, S_v in {16, 32, 64, 128}.\n"
+  "        case GGML_OP_GATED_DELTA_NET:\n            {\n                if (AGENTHQ_GENERIC_GPU(backend_ctx)) return false; // agenthq patch: kernels not built for this family, see (2)\n                // Match the Vulkan backend: only F32 -> F32, S_v in {16, 32, 64, 128}.\n"
+  "gated_delta_net supports_op")
+
+# (8) CL_CHECK aborts the whole process on any OpenCL error (SIGABRT). Throw instead:
+#     the exception propagates out of graph compute to agenthq_llama.cpp's
+#     safe_decode (AGENTHQ_ERR_DECODE) and to the self-test, which reports the
+#     failing call and error code per op instead of killing the app.
+_agenthq_replace(
+  "            GGML_ASSERT(0);                                         \\"
+  "            throw std::runtime_error(std::string(\"ggml_opencl: \") + #err + \" error \" + std::to_string(err_)); /* agenthq patch */ \\"
+  "CL_CHECK abort -> throw")
+
+# (9) kernel_rms_norm_mul / _mul_add reduce the per-subgroup partial sums with ONE
+#     sub_group_reduce_add over sum[0..sgs), i.e. they assume <= sgs subgroups per
+#     work-group (Intel: 1024/32 = 32 = sgs). With 16-wide subgroups a 1024-thread
+#     group has 64 subgroups and 48 partial sums are silently dropped (self-test:
+#     nmse 0.32 on [2560x4]). Cap the work-group at sgs*sgs threads (256).
+set(_cap_wg "    if (AGENTHQ_GENERIC_GPU(backend_ctx)) max_workgroup_size = MIN(max_workgroup_size, (int) (sgs*sgs)); // agenthq patch: kernel sums at most sgs partial sums\n")
+_agenthq_replace(
+  "    cl_kernel kernel = backend_ctx->kernel_rms_norm_mul_add;\n\n    int nth = sgs;\n    int max_workgroup_size = backend_ctx->get_kernel_workgroup_size(kernel);\n"
+  "    cl_kernel kernel = backend_ctx->kernel_rms_norm_mul_add;\n\n    int nth = sgs;\n    int max_workgroup_size = backend_ctx->get_kernel_workgroup_size(kernel);\n${_cap_wg}"
+  "rms_norm_mul_add work-group cap")
+_agenthq_replace(
+  "    cl_kernel kernel = backend_ctx->kernel_rms_norm_mul;\n\n    int nth = sgs;\n    int max_workgroup_size = backend_ctx->get_kernel_workgroup_size(kernel);\n"
+  "    cl_kernel kernel = backend_ctx->kernel_rms_norm_mul;\n\n    int nth = sgs;\n    int max_workgroup_size = backend_ctx->get_kernel_workgroup_size(kernel);\n${_cap_wg}"
+  "rms_norm_mul work-group cap")
+
+# (10) soft_max kernels have no work-group reduction: "local size must be wave
+#      size" (one subgroup per row). Intel uses 32; a 32-thread group on a 16-wide
+#      GPU is two subgroups that each normalise with half the sum (self-test:
+#      nmse 1.0). Use the real subgroup size.
+_agenthq_replace(
+  "    if (backend_ctx->gpu_family == INTEL) {\n        // This is the same as the initial value.\n        nth = MIN(32, ne00);\n    }"
+  "    if (backend_ctx->gpu_family == INTEL) {\n        // This is the same as the initial value.\n        nth = AGENTHQ_GENERIC_GPU(backend_ctx) ? MIN(16, ne00) : MIN(32, ne00); // agenthq patch: one 16-wide subgroup per row\n    }"
+  "soft_max wave size")
+
+# (11) name the failing op when a kernel launch is rejected (e.g. -54
+#      CL_INVALID_WORK_GROUP_SIZE): the exception text then says which ggml op and
+#      which global/local sizes were used, instead of only the CL call.
+_agenthq_replace(
+  "        GGML_UNUSED(tensor);\n        CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL));\n"
+  "        const cl_int enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL); // agenthq patch: named launch errors\n        if (enq_err != CL_SUCCESS) {\n            std::string msg = \"ggml_opencl: launch error \" + std::to_string(enq_err);\n            if (tensor) msg += std::string(\" op=\") + ggml_op_desc(tensor) + \" tensor=\" + tensor->name + \" ne=[\" + std::to_string(tensor->ne[0]) + \",\" + std::to_string(tensor->ne[1]) + \",\" + std::to_string(tensor->ne[2]) + \",\" + std::to_string(tensor->ne[3]) + \"]\";\n            msg += \" gws=\";\n            for (cl_uint i = 0; i < work_dim; i++) msg += (i ? \"x\" : \"\") + std::to_string(global_work_size[i]);\n            msg += \" lws=\";\n            if (local_work_size) { for (cl_uint i = 0; i < work_dim; i++) msg += (i ? \"x\" : \"\") + std::to_string(local_work_size[i]); } else msg += \"auto\";\n            msg += \" kernel_wg=\" + std::to_string(get_kernel_workgroup_size(kernel));\n            GGML_LOG_ERROR(\"%s\\n\", msg.c_str());\n            throw std::runtime_error(msg);\n        }\n"
+  "named launch errors")
+
+# (12) the Mali driver rejects a launch whose local size does not divide the global
+#      size (e.g. ADD on a 16-element tensor: gws=4, lws=64 -> -54
+#      CL_INVALID_WORK_GROUP_SIZE), although it reports non-uniform work-group
+#      support. Kernels that need a fixed group (reductions) always launch whole
+#      groups, so on a generic GPU an indivisible launch lets the driver choose.
+_agenthq_replace(
+  "        for (cl_uint i = 0; i < work_dim; i++) {\n            if (global_work_size[i] == 0) {\n                return;\n            }\n        }\n#ifdef GGML_OPENCL_PROFILING\n"
+  "        for (cl_uint i = 0; i < work_dim; i++) {\n            if (global_work_size[i] == 0) {\n                return;\n            }\n        }\n        if (local_work_size && AGENTHQ_GENERIC_GPU(this)) { // agenthq patch: Mali rejects partial work-groups\n            for (cl_uint i = 0; i < work_dim; i++) {\n                if (local_work_size[i] == 0 || global_work_size[i] % local_work_size[i] != 0) { local_work_size = nullptr; break; }\n            }\n        }\n#ifdef GGML_OPENCL_PROFILING\n"
+  "uniform work-groups on generic GPU")
+
+# (13) flash_attn_ext with head size 256 (Qwen3.5) gives wrong results on Mali
+#      (self-test nmse 3.4; head 128 is exact). Decline head sizes > 128 on a generic
+#      GPU: llama.cpp's flash-attention "auto" then disables FA for that model and
+#      uses mul_mat + soft_max, which are verified on the GPU.
+_agenthq_replace(
+  "            const int dk = q->ne[0];\n            const int dv = v->ne[0];\n\n            const struct { int dk; int dv; } supported_dims[] = {\n"
+  "            const int dk = q->ne[0];\n            const int dv = v->ne[0];\n            if (AGENTHQ_GENERIC_GPU(backend_ctx) && (dk > 128 || dv > 128)) return false; // agenthq patch: FA head > 128 is wrong on Mali\n\n            const struct { int dk; int dv; } supported_dims[] = {\n"
+  "flash_attn head > 128")
+
 if (_n_applied EQUAL 0)
   message(STATUS "agenthq: ggml-opencl patch: nothing to do (${_n_skipped} hunks already applied)")
   return()

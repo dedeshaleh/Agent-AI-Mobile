@@ -80,6 +80,20 @@ AGENTHQ_API void agenthq_set_cache_dir(const char* dir);
 // ggml-vulkan is touched and the OpenCL ICD loader simply finds no platform.
 AGENTHQ_API int agenthq_gpu_info(int backend, char* out, int cap);
 
+// Runs the ggml ops a decoder needs (mul_mat q4_K/q6_K/q8_0/f16/f32, rms_norm,
+// norm, soft_max, rope, flash_attn, mul/add/silu/swiglu, get_rows, cpy, scale) on
+// the CPU and on `backend` (1 Vulkan, 2 OpenCL) with identical random inputs and
+// writes a JSON report with the NMSE per op, plus the subgroup sizes the OpenCL
+// driver really uses:
+//   {"available":true,"backend":"opencl","device":"Mali-G610 MC6","reason":"",
+//    "subgroup":{"max_wg":1024,"kernel_wg":1024,"ndrange":{"16":16,...},
+//                "runtime":{"64":16,"256":16},"error":""},
+//    "tests":[{"op":"mul_mat q4_K ...","nmse":1.2e-5,"tol":5e-4,"ok":true,
+//              "supported":true,"gpu_ms":1.3,"cpu_ms":4.0,"error":""},...]}
+// No model needed; does not touch the loaded model. Takes a few seconds. Returns
+// bytes written, AGENTHQ_ERR_BUFFER_SMALL or AGENTHQ_ERR_INVALID_ARG.
+AGENTHQ_API int agenthq_gpu_selftest(int backend, char* out, int cap);
+
 // Clears memory, decodes the prompt (special tokens parsed) and prepares the
 // sampler chain. Fails with AGENTHQ_ERR_PROMPT_TOO_LONG if
 // prompt_tokens > n_ctx - max_tokens (counts reported in last error).
