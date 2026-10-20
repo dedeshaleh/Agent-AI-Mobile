@@ -132,6 +132,46 @@ void unload_locked() {
     g_gpu_layers = 0;
 }
 
+// Highest VkPhysicalDevice apiVersion on this device, or 0 when Vulkan is unusable.
+// ggml-vulkan needs core Vulkan 1.2 (timeline semaphores, buffer device address);
+// on 1.1 drivers (e.g. Mali-G610 on Infinix X6871) the loader hands ggml NULL
+// function pointers and it segfaults, so we refuse before ggml ever initialises.
+uint32_t vulkan_device_api_version() {
+#if defined(AGENTHQ_HAVE_VULKAN) && defined(__ANDROID__)
+    VkApplicationInfo app{};
+    app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app.pApplicationName = "agenthq-probe";
+    app.apiVersion = VK_API_VERSION_1_0;
+    VkInstanceCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.pApplicationInfo = &app;
+    VkInstance inst = VK_NULL_HANDLE;
+    if (vkCreateInstance(&ci, nullptr, &inst) != VK_SUCCESS || inst == VK_NULL_HANDLE) return 0;
+    uint32_t count = 0;
+    uint32_t best = 0;
+    if (vkEnumeratePhysicalDevices(inst, &count, nullptr) == VK_SUCCESS && count > 0) {
+        std::vector<VkPhysicalDevice> devs(count);
+        if (vkEnumeratePhysicalDevices(inst, &count, devs.data()) == VK_SUCCESS) {
+            for (uint32_t i = 0; i < count; i++) {
+                VkPhysicalDeviceProperties props{};
+                vkGetPhysicalDeviceProperties(devs[i], &props);
+                best = std::max(best, props.apiVersion);
+            }
+        }
+    }
+    vkDestroyInstance(inst, nullptr);
+    return best;
+#else
+    return 0;
+#endif
+}
+
+std::string vulkan_version_string(uint32_t v) {
+    char buf[32];
+    snprintf(buf, sizeof buf, "%u.%u", VK_VERSION_MAJOR(v), VK_VERSION_MINOR(v));
+    return buf;
+}
+
 // First GPU/iGPU device in the ggml registry, or nullptr. With GGML_VULKAN the
 // Vulkan backend registers lazily here; a missing driver makes
 // ggml_backend_vk_reg() return NULL (no devices) instead of aborting.
@@ -215,6 +255,12 @@ int agenthq_load(const char* model_path, int n_ctx, int n_threads, int n_batch, 
     const bool want_gpu = n_gpu_layers > 0;
     ggml_backend_dev_t gpu = nullptr;
     if (want_gpu) {
+        const uint32_t vk_version = vulkan_device_api_version();
+        if (vk_version < VK_API_VERSION_1_2) {
+            return fail(AGENTHQ_ERR_GPU_UNAVAILABLE,
+                        vk_version == 0 ? "no usable Vulkan driver"
+                                        : "GPU Vulkan " + vulkan_version_string(vk_version) + ", ggml needs 1.2");
+        }
         try {
             gpu = find_gpu_device();
         } catch (const std::exception& e) {
@@ -314,22 +360,34 @@ int agenthq_gpu_info(char* out, int cap) {
     if (!out || cap <= 0) return fail(AGENTHQ_ERR_INVALID_ARG, "out buffer is null/empty");
     backend_init_once();
 
-    std::string desc;
+    std::string desc, reason;
     bool available = false, integrated = false;
     size_t total = 0;
-    try {
-        ggml_backend_dev_t gpu = find_gpu_device();
-        if (gpu) {
-            available  = true;
-            integrated = ggml_backend_dev_type(gpu) == GGML_BACKEND_DEVICE_TYPE_IGPU;
-            size_t free_ = 0;
-            ggml_backend_dev_memory(gpu, &free_, &total);
-            json_escape(ggml_backend_dev_description(gpu), desc);
+    const uint32_t vk_version = vulkan_device_api_version();
+    if (vk_version == 0) {
+        reason = "Tidak ada driver Vulkan yang bisa dipakai";
+    } else if (vk_version < VK_API_VERSION_1_2) {
+        // Querying ggml's registry would initialise ggml-vulkan and crash on 1.1 drivers.
+        reason = "Vulkan " + vulkan_version_string(vk_version) + " (ggml butuh 1.2)";
+    } else {
+        try {
+            ggml_backend_dev_t gpu = find_gpu_device();
+            if (gpu) {
+                available  = true;
+                integrated = ggml_backend_dev_type(gpu) == GGML_BACKEND_DEVICE_TYPE_IGPU;
+                size_t free_ = 0;
+                ggml_backend_dev_memory(gpu, &free_, &total);
+                json_escape(ggml_backend_dev_description(gpu), desc);
+            } else {
+                reason = "ggml tidak menemukan perangkat GPU";
+            }
+        } catch (const std::exception& e) {
+            set_error(std::string("Vulkan query failed: ") + e.what());
+            reason = "Inisialisasi Vulkan gagal";
+        } catch (...) {
+            set_error("Vulkan query failed");
+            reason = "Inisialisasi Vulkan gagal";
         }
-    } catch (const std::exception& e) {
-        set_error(std::string("Vulkan query failed: ") + e.what());
-    } catch (...) {
-        set_error("Vulkan query failed");
     }
 
     char num[32];
@@ -342,7 +400,13 @@ int agenthq_gpu_info(char* out, int cap) {
     json += num;
     json += ",\"integrated\":";
     json += integrated ? "true" : "false";
-    json += "}";
+    json += ",\"api_version\":\"";
+    json += vk_version ? vulkan_version_string(vk_version) : "";
+    json += "\",\"reason\":\"";
+    std::string reason_escaped;
+    json_escape(reason.c_str(), reason_escaped);
+    json += reason_escaped;
+    json += "\"}";
 
     if ((int) json.size() + 1 > cap) {
         char buf[96];
@@ -396,8 +460,15 @@ int agenthq_start(const char* prompt, int max_tokens, float temperature, float t
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(kSeed));
 
     const auto t0 = clock_t_::now();
-    for (int i = 0; i < n_prompt; i += g_n_batch) {
-        const int n = std::min(g_n_batch, n_prompt - i);
+    // Small chunks keep agenthq_stop() responsive during prompt processing, which can
+    // take minutes when the model is being swapped.
+    const int chunk = std::min(g_n_batch, 128);
+    for (int i = 0; i < n_prompt; i += chunk) {
+        if (g_stop.load()) {
+            llama_sampler_free(smpl);
+            return fail(AGENTHQ_ERR_CANCELLED, "cancelled during prompt processing");
+        }
+        const int n = std::min(chunk, n_prompt - i);
         const int rc = safe_decode(llama_batch_get_one(tokens.data() + i, n));
         if (rc != 0) {
             llama_sampler_free(smpl);

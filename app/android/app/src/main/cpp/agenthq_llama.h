@@ -27,6 +27,8 @@ enum agenthq_error {
     // driver, Vulkan < 1.2, backend not compiled in) or the GPU load/context
     // creation failed. Caller should retry with n_gpu_layers = 0.
     AGENTHQ_ERR_GPU_UNAVAILABLE = -11,
+    // agenthq_stop() was called while the prompt was still being decoded.
+    AGENTHQ_ERR_CANCELLED       = -12,
 };
 
 // Loads a GGUF model and creates a context. n_batch <= 0 -> 512.

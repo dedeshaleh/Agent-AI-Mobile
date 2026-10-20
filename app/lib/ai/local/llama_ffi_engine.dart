@@ -26,10 +26,18 @@ class LlamaFfiEngine implements LocalEngine {
     this.batchSize = 512,
     Duration flushInterval = const Duration(milliseconds: 60),
     this._flushBytes = 32,
+    void Function()? directStop,
   })  : _createApi = createApi, // ignore: prefer_initializing_formals
-        _flushIntervalMs = flushInterval.inMilliseconds;
+        _flushIntervalMs = flushInterval.inMilliseconds,
+        // The worker isolate cannot read _CancelCmd while it is blocked inside a native
+        // call (prompt decode under memory pressure takes minutes), so cancel also raises
+        // the native stop flag from the calling isolate; agenthq_stop is an atomic store.
+        _directStop = directStop ?? (identical(createApi, _openNative) ? _nativeStop : null);
+
+  static void _nativeStop() => LlamaNative.open().stop();
 
   final LlamaApiFactory _createApi;
+  final void Function()? _directStop;
   final int batchSize;
   final int _flushIntervalMs;
   final int _flushBytes;
@@ -145,6 +153,11 @@ class LlamaFfiEngine implements LocalEngine {
   Future<void> cancel() async {
     final active = _active;
     if (active == null) return;
+    try {
+      _directStop?.call();
+    } catch (_) {
+      // Pustaka belum terbuka di isolate ini; worker tetap menerima _CancelCmd.
+    }
     _worker?.send(_CancelCmd(active.id));
     await active.controller.done.catchError((_) {});
   }

@@ -34,7 +34,15 @@ class LocalEngineGpuInfo {
     this.device = '',
     this.vramMb = 0,
     this.integrated = false,
+    this.apiVersion = '',
+    this.reason = '',
   });
+
+  /// Versi Vulkan tertinggi yang dilaporkan driver (mis. "1.1"); kosong bila tak ada.
+  final String apiVersion;
+
+  /// Alasan GPU tidak tersedia (bahasa Indonesia), kosong bila tersedia.
+  final String reason;
 
   /// Tidak ada GPU Vulkan yang bisa dipakai (default aman).
   static const none = LocalEngineGpuInfo();
@@ -54,6 +62,8 @@ class LocalEngineGpuInfo {
         device: (json['device'] as String?) ?? '',
         vramMb: (json['vram_mb'] as num?)?.toInt() ?? 0,
         integrated: json['integrated'] == true,
+        apiVersion: (json['api_version'] as String?) ?? '',
+        reason: (json['reason'] as String?) ?? '',
       );
 
   Map<String, Object?> toJson() => {
@@ -62,12 +72,14 @@ class LocalEngineGpuInfo {
         'device': device,
         'vram_mb': vramMb,
         'integrated': integrated,
+        'api_version': apiVersion,
+        'reason': reason,
       };
 
   /// Teks UI, mis. "Terdeteksi: Mali-G610 MC6, VRAM bersama" atau
-  /// "Tidak ada GPU Vulkan".
+  /// "GPU tidak bisa dipakai: Vulkan 1.1 (ggml butuh 1.2)".
   String get label {
-    if (!available) return 'Tidak ada GPU Vulkan';
+    if (!available) return reason.isEmpty ? 'Tidak ada GPU Vulkan' : 'GPU tidak bisa dipakai: $reason';
     final mem = integrated ? 'VRAM bersama' : 'VRAM $vramMb MB';
     return 'Terdeteksi: ${device.isEmpty ? 'GPU Vulkan' : device}, $mem';
   }
