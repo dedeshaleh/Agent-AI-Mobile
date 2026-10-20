@@ -13,6 +13,13 @@ import 'package:agent_hq/ai/local/llama_bindings.dart';
 /// Path model yang membuat `load` gagal.
 const failingModelPath = '/models/fail.gguf';
 
+/// Path model yang gagal dengan `AGENTHQ_ERR_GPU_UNAVAILABLE` (-11) bila
+/// `nGpuLayers > 0`, tetapi berhasil di CPU (meniru HP tanpa driver Vulkan).
+const gpuUnavailableModelPath = '/models/no-gpu.gguf';
+
+/// Jumlah layer palsu; `gpuLayers` dilaporkan sebagai min(diminta, 29).
+const fakeModelLayers = 28;
+
 class FakeScript {
   const FakeScript({
     this.pieces = const [],
@@ -64,23 +71,51 @@ class FakeLlamaApi implements LlamaNativeApi {
   int _emitted = 0;
   int? _errorAfter;
 
+  int _gpuLayers = 0;
+  int _lastRequestedGpuLayers = 0;
+  int _gpuInfoCalls = 0;
+
   @override
-  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch}) {
+  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch, int nGpuLayers = 0}) {
+    _lastRequestedGpuLayers = nGpuLayers;
     if (modelPath == failingModelPath) {
       _lastError = 'llama_model_load_from_file failed';
       throw LlamaNativeException(-2, _lastError);
     }
+    if (modelPath == gpuUnavailableModelPath && nGpuLayers > 0) {
+      _lastError = 'no Vulkan GPU device (driver missing or Vulkan < 1.2)';
+      throw LlamaNativeException(-11, _lastError);
+    }
     _loaded = true;
+    // Seperti shim C: >= 99 berarti semua layer; llama memakai min(n, n_layer + 1).
+    final wanted = nGpuLayers >= 99 || nGpuLayers < 0 ? 999 : nGpuLayers;
+    _gpuLayers = wanted > fakeModelLayers + 1 ? fakeModelLayers + 1 : wanted;
   }
 
   @override
   void unload() {
     _loaded = false;
+    _gpuLayers = 0;
     _unloadCalls++;
   }
 
   @override
   bool get isLoaded => _loaded;
+
+  @override
+  int get gpuLayers => _loaded ? _gpuLayers : 0;
+
+  @override
+  Map<String, Object?> gpuInfo() {
+    _gpuInfoCalls++;
+    return {
+      'available': true,
+      'backend': 'vulkan',
+      'device': 'Fake GPU "G1"',
+      'vram_mb': 4096,
+      'integrated': true,
+    };
+  }
 
   @override
   void start(
@@ -135,5 +170,7 @@ class FakeLlamaApi implements LlamaNativeApi {
         'stop_calls': _stopCalls,
         'start_calls': _startCalls,
         'unload_calls': _unloadCalls,
+        'requested_gpu_layers': _lastRequestedGpuLayers,
+        'gpu_info_calls': _gpuInfoCalls,
       };
 }

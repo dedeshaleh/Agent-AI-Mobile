@@ -12,12 +12,65 @@ class LocalModelInfo {
     required this.path,
     required this.contextLength,
     required this.threads,
+    this.gpuLayers = 0,
     this.description = '',
   });
   final String path;
   final int contextLength;
   final int threads;
+
+  /// Jumlah layer yang benar-benar di-offload ke GPU (0 = CPU saja).
+  final int gpuLayers;
   final String description;
+
+  bool get usesGpu => gpuLayers > 0;
+}
+
+/// Hasil deteksi GPU dari registry backend ggml (tanpa perlu memuat model).
+class LocalEngineGpuInfo {
+  const LocalEngineGpuInfo({
+    this.available = false,
+    this.backend = 'vulkan',
+    this.device = '',
+    this.vramMb = 0,
+    this.integrated = false,
+  });
+
+  /// Tidak ada GPU Vulkan yang bisa dipakai (default aman).
+  static const none = LocalEngineGpuInfo();
+
+  final bool available;
+  final String backend;
+  final String device;
+
+  /// Total memori perangkat GPU dalam MB; untuk GPU terintegrasi (Mali/Adreno)
+  /// ini memori bersama dengan sistem.
+  final int vramMb;
+  final bool integrated;
+
+  factory LocalEngineGpuInfo.fromJson(Map<String, Object?> json) => LocalEngineGpuInfo(
+        available: json['available'] == true,
+        backend: (json['backend'] as String?) ?? 'vulkan',
+        device: (json['device'] as String?) ?? '',
+        vramMb: (json['vram_mb'] as num?)?.toInt() ?? 0,
+        integrated: json['integrated'] == true,
+      );
+
+  Map<String, Object?> toJson() => {
+        'available': available,
+        'backend': backend,
+        'device': device,
+        'vram_mb': vramMb,
+        'integrated': integrated,
+      };
+
+  /// Teks UI, mis. "Terdeteksi: Mali-G610 MC6, VRAM bersama" atau
+  /// "Tidak ada GPU Vulkan".
+  String get label {
+    if (!available) return 'Tidak ada GPU Vulkan';
+    final mem = integrated ? 'VRAM bersama' : 'VRAM $vramMb MB';
+    return 'Terdeteksi: ${device.isEmpty ? 'GPU Vulkan' : device}, $mem';
+  }
 }
 
 class LocalGenerateOptions {
@@ -40,8 +93,18 @@ class LocalGenerateOptions {
 }
 
 class LocalEngineException implements Exception {
-  const LocalEngineException(this.message);
+  const LocalEngineException(this.message, {this.code = 0});
   final String message;
+
+  /// Kode `agenthq_error` dari lapisan native (0 bila bukan dari native).
+  final int code;
+
+  /// `AGENTHQ_ERR_GPU_UNAVAILABLE`: offload GPU diminta tetapi tidak ada
+  /// perangkat Vulkan yang bisa dipakai; pemanggil harus mengulang dengan CPU.
+  static const gpuUnavailableCode = -11;
+
+  bool get isGpuUnavailable => code == gpuUnavailableCode;
+
   @override
   String toString() => 'LocalEngineException: $message';
 }
@@ -52,9 +115,16 @@ abstract class LocalEngine {
   LocalModelInfo? get loadedModel;
 
   /// Memuat satu model. Model yang sedang dimuat akan di-unload dulu.
-  Future<void> load(String modelPath, {int contextLength = 2048, int threads = 4});
+  /// [gpuLayers]: 0 = CPU saja (default), N = N layer ke GPU (Vulkan),
+  /// >= 99 = semua layer. Melempar [LocalEngineException] dengan
+  /// [LocalEngineException.isGpuUnavailable] bila GPU diminta tetapi tidak ada.
+  Future<void> load(String modelPath, {int contextLength = 2048, int threads = 4, int gpuLayers = 0});
 
   Future<void> unload();
+
+  /// Deteksi GPU (Vulkan) lewat registry backend; tidak perlu model dimuat.
+  /// Implementasi tanpa dukungan GPU mengembalikan [LocalEngineGpuInfo.none].
+  Future<LocalEngineGpuInfo> gpuInfo() async => LocalEngineGpuInfo.none;
 
   /// Prompt sudah dalam format template model (mis. ChatML). Stream berisi
   /// potongan teks yang sudah di-batch (tiap 50–100 ms), bukan per token.

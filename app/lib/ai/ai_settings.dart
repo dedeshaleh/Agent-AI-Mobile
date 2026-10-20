@@ -19,6 +19,8 @@ class AiSettings {
     this.contextLength = 2048,
     this.threads = 4,
     this.maxTokens = 256,
+    this.useGpu = false,
+    this.gpuLayers = 99,
   });
 
   final AiMode mode;
@@ -32,6 +34,19 @@ class AiSettings {
   final int contextLength;
   final int threads;
   final int maxTokens;
+
+  /// Backend inferensi lokal: false = CPU (default aman), true = GPU Vulkan
+  /// (eksperimental, per perangkat; keputusan berdasarkan benchmark).
+  final bool useGpu;
+
+  /// Layer yang di-offload ke GPU bila [useGpu]; 99 = semua layer.
+  final int gpuLayers;
+
+  /// Nilai [gpuLayers] yang berarti "semua layer".
+  static const allGpuLayers = 99;
+
+  /// Layer GPU efektif yang dikirim ke engine (0 bila CPU).
+  int get effectiveGpuLayers => useGpu ? gpuLayers : 0;
 
   static const defaults = AiSettings();
 
@@ -62,6 +77,8 @@ class AiSettings {
     int? contextLength,
     int? threads,
     int? maxTokens,
+    bool? useGpu,
+    int? gpuLayers,
   }) =>
       AiSettings(
         mode: mode ?? this.mode,
@@ -71,6 +88,8 @@ class AiSettings {
         contextLength: contextLength ?? this.contextLength,
         threads: threads ?? this.threads,
         maxTokens: maxTokens ?? this.maxTokens,
+        useGpu: useGpu ?? this.useGpu,
+        gpuLayers: gpuLayers ?? this.gpuLayers,
       );
 
   AiSettings upsertProvider(ProviderConfig cfg) {
@@ -103,6 +122,8 @@ class AiSettings {
         'context_length': contextLength,
         'threads': threads,
         'max_tokens': maxTokens,
+        'use_gpu': useGpu,
+        'gpu_layers': gpuLayers,
       };
 
   factory AiSettings.fromJson(Map<String, Object?> json) {
@@ -135,6 +156,8 @@ class AiSettings {
       contextLength: (json['context_length'] as int?) ?? 2048,
       threads: (json['threads'] as int?) ?? 4,
       maxTokens: (json['max_tokens'] as int?) ?? 256,
+      useGpu: (json['use_gpu'] as bool?) ?? false,
+      gpuLayers: (json['gpu_layers'] as int?) ?? allGpuLayers,
     );
   }
 

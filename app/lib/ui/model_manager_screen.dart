@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../ai/ai_provider.dart';
+import '../ai/ai_settings.dart';
 import '../ai/local/local_engine.dart';
 import '../ai/model_manager.dart';
 import '../app_controller.dart';
@@ -57,6 +58,21 @@ class _ModelManagerScreenState extends State<ModelManagerScreen> {
   }
 
   Future<void> _load() async {
+    final warning = c.memoryWarningForActiveModel();
+    if (warning != null) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('RAM tidak cukup'),
+          content: Text(warning),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Batal')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Tetap muat')),
+          ],
+        ),
+      );
+      if (proceed != true || !mounted) return;
+    }
     setState(() => _loading = true);
     final error = await c.loadActiveModel();
     if (!mounted) return;
@@ -88,6 +104,15 @@ class _ModelManagerScreenState extends State<ModelManagerScreen> {
     } finally {
       if (mounted) setState(() => _benchmarking = false);
     }
+  }
+
+  /// "CPU 4 thread" atau "GPU Vulkan · 36 layer" dari model yang dimuat; bila
+  /// belum dimuat, dari setelan yang akan dipakai saat memuat.
+  String _backendLabel() {
+    final m = c.engine.loadedModel;
+    if (m != null) return m.usesGpu ? 'GPU Vulkan · ${m.gpuLayers} layer' : 'CPU ${m.threads} thread';
+    final s = c.settings;
+    return s.useGpu ? 'GPU Vulkan · ${s.gpuLayers >= AiSettings.allGpuLayers ? 'semua' : s.gpuLayers} layer (saat dimuat)' : 'CPU ${s.threads} thread';
   }
 
   String _fmtStats(Map<String, Object?> s) {
@@ -130,7 +155,8 @@ class _ModelManagerScreenState extends State<ModelManagerScreen> {
                       ),
                       const SizedBox(height: 6),
                       Text('Aktif: ${m.activeModel?.name ?? '—'}', style: const TextStyle(fontSize: 12, color: HqColors.muted)),
-                      Text('Context ${c.settings.contextLength} · ${c.settings.threads} thread · CPU arm64 (llama.cpp tertanam)', style: const TextStyle(fontSize: 12, color: HqColors.muted)),
+                      Text('Context ${c.settings.contextLength} · arm64 (llama.cpp tertanam)', style: const TextStyle(fontSize: 12, color: HqColors.muted)),
+                      Text('Backend: ${_backendLabel()}', style: const TextStyle(fontSize: 12, color: HqColors.muted)),
                       if (c.engine.lastStats.isNotEmpty) Text(_fmtStats(c.engine.lastStats), style: const TextStyle(fontSize: 11, color: HqColors.muted)),
                       const SizedBox(height: 8),
                       Row(

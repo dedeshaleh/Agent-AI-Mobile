@@ -10,6 +10,14 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # the clone (useful for standalone rebuilds; see README.md).
 set(AGENTHQ_LLAMA_TAG "b11727" CACHE STRING "llama.cpp git tag")
 
+# Optional GPU backend (ggml Vulkan) compiled into the same libagenthq_llama.so.
+# Default ON; the CPU backend is always built. Needs a HOST C++ compiler to build
+# llama.cpp's shader generator (vulkan-shaders-gen) and the NDK's glslc; when no
+# host compiler is found the build falls back to CPU-only with a warning.
+option(AGENTHQ_GPU_VULKAN "Build the ggml Vulkan backend into libagenthq_llama.so" ON)
+set(AGENTHQ_VULKAN_HEADERS_TAG "v1.4.363"             CACHE STRING "KhronosGroup/Vulkan-Headers tag (vulkan.hpp; NDK ships only the C headers)")
+set(AGENTHQ_SPIRV_HEADERS_TAG  "vulkan-sdk-1.4.363.0" CACHE STRING "KhronosGroup/SPIRV-Headers tag (spirv/unified1/spirv.hpp)")
+
 set(BUILD_SHARED_LIBS      OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP            OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE            OFF CACHE BOOL "" FORCE)
@@ -35,6 +43,102 @@ if (ANDROID_ABI STREQUAL "arm64-v8a" OR CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch6
 endif()
 
 include(FetchContent)
+
+# --- Vulkan backend prerequisites ------------------------------------------
+# llama.cpp's ggml-vulkan needs (a) vulkan.hpp + a recent vulkan_core.h (the NDK
+# sysroot only has the C headers at VK_HEADER_VERSION 275), (b) SPIRV-Headers,
+# (c) glslc (NDK shader-tools) and (d) a host compiler for vulkan-shaders-gen,
+# which is built as an ExternalProject and *executed* at build time.
+set(AGENTHQ_GPU_VULKAN_ENABLED OFF)
+if (AGENTHQ_GPU_VULKAN)
+  set(_agenthq_vk_ok ON)
+
+  # (d) host compiler -> toolchain file for the ExternalProject.
+  if (CMAKE_CROSSCOMPILING AND NOT GGML_VULKAN_SHADERS_GEN_TOOLCHAIN)
+    set(_agenthq_host_hints "")
+    if (CMAKE_HOST_WIN32)
+      # winget portable packages (WinLibs / LLVM-MinGW, user scope) plus MSYS2/MinGW defaults.
+      file(GLOB _agenthq_winget_bins
+        "$ENV{LOCALAPPDATA}/Microsoft/WinGet/Packages/BrechtSanders.WinLibs*/mingw64/bin"
+        "$ENV{LOCALAPPDATA}/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW*/*/bin")
+      list(APPEND _agenthq_host_hints
+        ${_agenthq_winget_bins}
+        "$ENV{LOCALAPPDATA}/Microsoft/WinGet/Links"
+        "C:/msys64/ucrt64/bin" "C:/msys64/mingw64/bin" "C:/mingw64/bin")
+    endif()
+    find_program(AGENTHQ_HOST_C_COMPILER   NAMES gcc clang cl   HINTS ${_agenthq_host_hints} NO_CMAKE_FIND_ROOT_PATH)
+    find_program(AGENTHQ_HOST_CXX_COMPILER NAMES g++ clang++ cl HINTS ${_agenthq_host_hints} NO_CMAKE_FIND_ROOT_PATH)
+    if (AGENTHQ_HOST_C_COMPILER AND AGENTHQ_HOST_CXX_COMPILER)
+      message(STATUS "agenthq: host compiler for vulkan-shaders-gen: ${AGENTHQ_HOST_CXX_COMPILER}")
+      # Gradle passes CMAKE_MAKE_PROGRAM with Windows backslashes, which CMake would read
+      # as escapes inside the generated toolchain file.
+      file(TO_CMAKE_PATH "${CMAKE_MAKE_PROGRAM}" AGENTHQ_HOST_MAKE_PROGRAM)
+      configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/host-toolchain.cmake.in
+                     ${CMAKE_BINARY_DIR}/agenthq-host-toolchain.cmake @ONLY)
+      set(GGML_VULKAN_SHADERS_GEN_TOOLCHAIN "${CMAKE_BINARY_DIR}/agenthq-host-toolchain.cmake" CACHE FILEPATH "" FORCE)
+    else()
+      message(WARNING "agenthq: no host C/C++ compiler found (gcc/clang/cl) to build vulkan-shaders-gen; "
+                      "building CPU-only. Install e.g. `winget install BrechtSanders.WinLibs.POSIX.UCRT` "
+                      "or pass -DGGML_VULKAN_SHADERS_GEN_TOOLCHAIN=<host toolchain file>.")
+      set(_agenthq_vk_ok OFF)
+    endif()
+  endif()
+
+  # (c) glslc from the NDK (no Vulkan SDK on this PC).
+  if (_agenthq_vk_ok AND NOT Vulkan_GLSLC_EXECUTABLE)
+    set(_agenthq_glslc_hints "")
+    if (ANDROID_NDK)
+      file(GLOB _agenthq_glslc_hints "${ANDROID_NDK}/shader-tools/*")
+    endif()
+    find_program(Vulkan_GLSLC_EXECUTABLE NAMES glslc HINTS ${_agenthq_glslc_hints} NO_CMAKE_FIND_ROOT_PATH)
+    if (NOT Vulkan_GLSLC_EXECUTABLE)
+      message(WARNING "agenthq: glslc not found (expected under ${ANDROID_NDK}/shader-tools); building CPU-only.")
+      set(_agenthq_vk_ok OFF)
+    endif()
+  endif()
+
+  if (_agenthq_vk_ok)
+    # (a)+(b) header-only Khronos repos, shallow clones.
+    FetchContent_Declare(vulkan_headers
+      GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+      GIT_TAG        ${AGENTHQ_VULKAN_HEADERS_TAG}
+      GIT_SHALLOW    TRUE)
+    FetchContent_Declare(spirv_headers
+      GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
+      GIT_TAG        ${AGENTHQ_SPIRV_HEADERS_TAG}
+      GIT_SHALLOW    TRUE)
+    FetchContent_Populate(vulkan_headers)
+    FetchContent_Populate(spirv_headers)
+
+    # Satisfy FindVulkan without a Vulkan SDK: headers from Khronos, loader from the NDK sysroot.
+    set(Vulkan_INCLUDE_DIR "${vulkan_headers_SOURCE_DIR}/include" CACHE PATH "" FORCE)
+    if (NOT Vulkan_LIBRARY)
+      find_library(Vulkan_LIBRARY NAMES vulkan)   # <sysroot>/usr/lib/aarch64-linux-android/<api>/libvulkan.so
+    endif()
+    if (NOT Vulkan_LIBRARY)
+      message(WARNING "agenthq: libvulkan.so not found in the NDK sysroot; building CPU-only.")
+      set(_agenthq_vk_ok OFF)
+    endif()
+  endif()
+
+  if (_agenthq_vk_ok)
+    # ggml-vulkan does find_package(SPIRV-Headers CONFIG REQUIRED); point it at a stub
+    # config that wraps the fetched checkout. The Android toolchain re-roots package
+    # search (MODE_PACKAGE ONLY), so allow host paths for packages too.
+    set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+    set(SPIRV-Headers_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/SPIRV-Headers" CACHE PATH "" FORCE)
+    set(AGENTHQ_SPIRV_HEADERS_INCLUDE "${spirv_headers_SOURCE_DIR}/include")
+
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+    set(AGENTHQ_GPU_VULKAN_ENABLED ON)
+    message(STATUS "agenthq: GGML_VULKAN=ON (glslc: ${Vulkan_GLSLC_EXECUTABLE}; loader: ${Vulkan_LIBRARY})")
+  else()
+    set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+  endif()
+else()
+  set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_Declare(
   llama_cpp
   GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
@@ -42,14 +146,33 @@ FetchContent_Declare(
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
   GIT_CONFIG     core.longpaths=true # Windows: some llama.cpp paths exceed MAX_PATH in deep build dirs
+  # Mali/Android: make ggml's buffer-device-address use opt-out (GGML_VK_DISABLE_BDA),
+  # otherwise the first Vulkan host buffer dereferences a NULL loader entry.
+  PATCH_COMMAND  ${CMAKE_COMMAND} -DSRC=<SOURCE_DIR> -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch-ggml-vulkan.cmake
+  UPDATE_DISCONNECTED TRUE
 )
 FetchContent_MakeAvailable(llama_cpp)
+
+if (AGENTHQ_GPU_VULKAN_ENABLED AND TARGET ggml-vulkan)
+  # spirv.hpp is included via __has_include; ggml-vulkan's CMake only checks the package exists.
+  target_include_directories(ggml-vulkan PRIVATE ${AGENTHQ_SPIRV_HEADERS_INCLUDE})
+  # vulkan.hpp exceptions are caught by ggml (ggml_backend_vk_reg returns NULL when
+  # instance creation fails), so RTTI/exceptions stay on for this target.
+  target_compile_options(ggml-vulkan PRIVATE -fexceptions -frtti)
+  # std::aligned_alloc needs API 28 on Bionic; the app targets android-26.
+  if (ANDROID)
+    target_compile_options(ggml-vulkan PRIVATE "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/cmake/agenthq_vk_compat.h")
+  endif()
+endif()
 
 # --- shim -------------------------------------------------------------------
 add_library(agenthq_llama SHARED agenthq_llama.cpp)
 target_include_directories(agenthq_llama PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(agenthq_llama PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(agenthq_llama PRIVATE llama ggml)
+if (AGENTHQ_GPU_VULKAN_ENABLED)
+  target_compile_definitions(agenthq_llama PRIVATE AGENTHQ_HAVE_VULKAN=1)
+endif()
 if (ANDROID)
   target_link_libraries(agenthq_llama PRIVATE log)
 endif()

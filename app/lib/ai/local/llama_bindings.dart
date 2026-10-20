@@ -5,6 +5,7 @@
 /// pekerja (`LlamaFfiEngine`), bukan dari UI isolate.
 library;
 
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
@@ -24,11 +25,20 @@ class LlamaNativeException implements Exception {
 /// diuji dengan implementasi palsu tanpa kode native.
 abstract class LlamaNativeApi {
   /// Memuat model; melempar [LlamaNativeException] bila gagal.
-  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch});
+  /// [nGpuLayers] 0 = CPU saja; >= 99 = semua layer ke GPU (Vulkan).
+  /// Kode `-11` (`AGENTHQ_ERR_GPU_UNAVAILABLE`) berarti GPU tidak tersedia.
+  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch, int nGpuLayers = 0});
 
   void unload();
 
   bool get isLoaded;
+
+  /// Layer yang benar-benar di-offload ke GPU oleh model yang dimuat (0 = CPU).
+  int get gpuLayers;
+
+  /// JSON `agenthq_gpu_info` yang sudah di-decode: `available`, `backend`,
+  /// `device`, `vram_mb`, `integrated`. Tidak perlu model dimuat.
+  Map<String, Object?> gpuInfo();
 
   /// Menyiapkan satu sesi generate (reset KV, decode prompt, siapkan sampler).
   void start(
@@ -50,12 +60,14 @@ abstract class LlamaNativeApi {
   String lastError();
 
   /// Kunci: `load_ms`, `prompt_tokens_per_s`, `gen_tokens_per_s`,
-  /// `prompt_tokens`, `gen_tokens`.
+  /// `prompt_tokens`, `gen_tokens`, `gpu_layers`.
   Map<String, Object?> stats();
 }
 
-typedef _LoadC = Int32 Function(Pointer<Utf8>, Int32, Int32, Int32);
-typedef _LoadD = int Function(Pointer<Utf8>, int, int, int);
+typedef _LoadC = Int32 Function(Pointer<Utf8>, Int32, Int32, Int32, Int32);
+typedef _LoadD = int Function(Pointer<Utf8>, int, int, int, int);
+typedef _GpuInfoC = Int32 Function(Pointer<Utf8>, Int32);
+typedef _GpuInfoD = int Function(Pointer<Utf8>, int);
 typedef _VoidC = Void Function();
 typedef _VoidD = void Function();
 typedef _IntC = Int32 Function();
@@ -77,6 +89,8 @@ class LlamaNative implements LlamaNativeApi {
       : _load = lib.lookupFunction<_LoadC, _LoadD>('agenthq_load'),
         _unload = lib.lookupFunction<_VoidC, _VoidD>('agenthq_unload'),
         _isLoaded = lib.lookupFunction<_IntC, _IntD>('agenthq_is_loaded'),
+        _gpuLayers = lib.lookupFunction<_IntC, _IntD>('agenthq_gpu_layers'),
+        _gpuInfo = lib.lookupFunction<_GpuInfoC, _GpuInfoD>('agenthq_gpu_info'),
         _start = lib.lookupFunction<_StartC, _StartD>('agenthq_start'),
         _next = lib.lookupFunction<_NextC, _NextD>('agenthq_next'),
         _stop = lib.lookupFunction<_VoidC, _VoidD>('agenthq_stop'),
@@ -100,6 +114,8 @@ class LlamaNative implements LlamaNativeApi {
   final _LoadD _load;
   final _VoidD _unload;
   final _IntD _isLoaded;
+  final _IntD _gpuLayers;
+  final _GpuInfoD _gpuInfo;
   final _StartD _start;
   final _NextD _next;
   final _VoidD _stop;
@@ -108,10 +124,10 @@ class LlamaNative implements LlamaNativeApi {
   final Pointer<Uint8> _pieceBuf;
 
   @override
-  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch}) {
+  void load(String modelPath, {required int nCtx, required int nThreads, required int nBatch, int nGpuLayers = 0}) {
     final path = modelPath.toNativeUtf8();
     try {
-      _check(_load(path, nCtx, nThreads, nBatch));
+      _check(_load(path, nCtx, nThreads, nBatch, nGpuLayers));
     } finally {
       calloc.free(path);
     }
@@ -122,6 +138,23 @@ class LlamaNative implements LlamaNativeApi {
 
   @override
   bool get isLoaded => _isLoaded() != 0;
+
+  @override
+  int get gpuLayers => _gpuLayers();
+
+  @override
+  Map<String, Object?> gpuInfo() {
+    const cap = 512;
+    final buf = calloc<Uint8>(cap);
+    try {
+      final n = _gpuInfo(buf.cast<Utf8>(), cap);
+      if (n < 0) throw LlamaNativeException(n, lastError());
+      final decoded = jsonDecode(utf8.decode(buf.asTypedList(n)));
+      return decoded is Map ? decoded.cast<String, Object?>() : const {};
+    } finally {
+      calloc.free(buf);
+    }
+  }
 
   @override
   void start(
@@ -172,6 +205,7 @@ class LlamaNative implements LlamaNativeApi {
         'gen_tokens_per_s': d[2],
         'prompt_tokens': i[0],
         'gen_tokens': i[1],
+        'gpu_layers': _gpuLayers(),
       };
     } finally {
       calloc.free(d);

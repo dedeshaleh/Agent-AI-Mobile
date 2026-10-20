@@ -12,6 +12,16 @@ Mengikuti PRD v1.1 §6. Semua AI diakses lewat `AiProvider` dan `AiRouter` (`app
 
 Rekomendasi: `Qwen3-1.7B-Q4_K_M` (≈1,1 GB) untuk uji awal, `Qwen3-4B-Q4_K_M` (≈2,5 GB) sebagai target PRD setelah benchmark.
 
+### GPU (Vulkan)
+
+- `libagenthq_llama.so` memuat dua backend ggml sekaligus: CPU (selalu) dan Vulkan (`GGML_VULKAN=ON`, opsi CMake `AGENTHQ_GPU_VULKAN`, default ON). Satu `.so`; `NEEDED` bertambah `libvulkan.so` (loader bawaan Android ≥ 7, ada di semua perangkat; driver GPU-lah yang mungkin tidak ada). Ukuran `.so` setelah strip: 4,0 MB (CPU saja) → 23,1 MB (CPU+Vulkan; 18 MB di antaranya blob shader SPIR-V). Bila ukuran APK jadi masalah, build dengan `-DAGENTHQ_GPU_VULKAN=OFF`.
+- **Default CPU.** Di **Pengaturan AI → Parameter model lokal** pengguna memilih backend `CPU` / `GPU (Vulkan, eksperimental)` dan slider **Layer di GPU** (1–99; 99 = semua layer). Baris "Terdeteksi: Mali-G610 MC6, VRAM bersama" / "Tidak ada GPU Vulkan" berasal dari `agenthq_gpu_info()` yang membaca registry perangkat ggml (`ggml_backend_dev_*`) tanpa memuat model. Berlaku saat model dimuat ulang.
+- Setelan disimpan di `AiSettings.useGpu` / `gpuLayers` (`use_gpu`, `gpu_layers` di JSON prefs). `AppController.loadActiveModel` mengirim `gpuLayers: useGpu ? gpuLayers : 0`.
+- **Fallback otomatis.** Jika GPU diminta tetapi tidak ada perangkat Vulkan ≥ 1.2 (atau load/konteks GPU gagal), native mengembalikan `AGENTHQ_ERR_GPU_UNAVAILABLE` (-11), `LocalEngineException.isGpuUnavailable` menjadi true, dan controller memuat ulang dengan `gpuLayers: 0` lalu menampilkan "GPU tidak tersedia, memakai CPU". Setelan GPU tetap tersimpan. Exception Vulkan saat decode (device lost / OOM) dipetakan ke `AGENTHQ_ERR_DECODE`, bukan crash.
+- Layar **Model** menampilkan `Backend: CPU 4 thread` atau `Backend: GPU Vulkan · 37 layer` (jumlah layer yang benar-benar di-offload = min(diminta, n_layer + 1), dari `agenthq_gpu_layers()` / `lastStats['gpu_layers']`). Pakai **Benchmark singkat** di CPU lalu GPU dan catat ke `docs/BENCHMARK.md`; keputusan default per perangkat mengikuti angka itu, bukan asumsi.
+- Build: butuh compiler host untuk `vulkan-shaders-gen` (di PC ini WinLibs MinGW-w64 GCC via winget) dan `glslc` dari NDK; detail di `app/android/app/src/main/cpp/README.md`. Mali-G610 adalah GPU terintegrasi (`GGML_BACKEND_DEVICE_TYPE_IGPU`): memori "VRAM" adalah RAM bersama, jadi model 4B Q4 + KV cache tetap bersaing dengan Unity.
+- Belum diverifikasi di perangkat: kecepatan token/s GPU vs CPU di Infinix X6871, suhu, dan dampak ke FPS game view.
+
 ## Provider eksternal (opsional)
 
 | Jenis | Isi | Catatan |

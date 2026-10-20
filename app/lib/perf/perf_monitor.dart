@@ -3,6 +3,37 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
+
+import 'device_info.dart';
+
+/// Status termal Android (PowerManager.THERMAL_STATUS_*).
+enum ThermalLevel {
+  unknown('—'),
+  none('Normal'),
+  light('Hangat'),
+  moderate('Panas'),
+  severe('Sangat panas'),
+  critical('Kritis'),
+  emergency('Darurat'),
+  shutdown('Shutdown');
+
+  const ThermalLevel(this.label);
+  final String label;
+
+  static ThermalLevel fromStatus(int? status) => switch (status) {
+        0 => none,
+        1 => light,
+        2 => moderate,
+        3 => severe,
+        4 => critical,
+        5 => emergency,
+        6 => shutdown,
+        _ => unknown,
+      };
+
+  bool get isHot => index >= moderate.index;
+}
 
 /// Statistik performa untuk overlay: FPS Flutter, FPS/frame-time Unity
 /// (dikirim lewat bridge), CPU % proses, RSS, nama GPU, tokens/s terakhir.
@@ -26,6 +57,18 @@ class PerfMonitor extends ChangeNotifier {
   int rssBytes = 0;
   double tokensPerSecond = 0;
   double? uiFrameMs;
+  ThermalLevel thermal = ThermalLevel.unknown;
+
+  /// RAM sistem yang masih tersedia (MemAvailable); 0 bila tidak terbaca.
+  int availableBytes = 0;
+  int swapUsedBytes = 0;
+
+  String get availableLabel => availableBytes >= 1 << 30 ? '${(availableBytes / (1 << 30)).toStringAsFixed(1)} GB' : '${availableBytes ~/ (1 << 20)} MB';
+
+  /// Tekanan memori: RAM tersedia < 600 MB (model mulai di-swap).
+  bool get memoryPressure => availableBytes > 0 && availableBytes < 600 * (1 << 20);
+
+  static const _thermalChannel = MethodChannel('agenthq/thermal');
 
   int _lastCpuTicks = -1;
   DateTime _lastCpuAt = DateTime.now();
@@ -60,7 +103,28 @@ class PerfMonitor extends ChangeNotifier {
     _frames = 0;
     rssBytes = ProcessInfo.currentRss;
     _sampleCpu();
+    final mem = SystemMemory.read();
+    if (mem != null) {
+      availableBytes = mem.availableBytes;
+      swapUsedBytes = mem.swapUsedBytes;
+    }
     notifyListeners();
+    if (Platform.isAndroid) _sampleThermal();
+  }
+
+  Future<void> _sampleThermal() async {
+    try {
+      final status = await _thermalChannel.invokeMethod<int>('status');
+      final next = ThermalLevel.fromStatus(status);
+      if (next != thermal) {
+        thermal = next;
+        notifyListeners();
+      }
+    } on MissingPluginException {
+      // Build lama tanpa channel: biarkan '—'.
+    } on PlatformException {
+      // Tidak didukung perangkat.
+    }
   }
 
   void _sampleCpu() {

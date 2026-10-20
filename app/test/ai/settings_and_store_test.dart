@@ -39,6 +39,31 @@ void main() {
       }
     });
 
+    test('default backend CPU: useGpu false, gpuLayers 99 (semua), effective 0', () {
+      const s = AiSettings();
+      expect(s.useGpu, isFalse);
+      expect(s.gpuLayers, AiSettings.allGpuLayers);
+      expect(s.effectiveGpuLayers, 0);
+      expect(s.copyWith(useGpu: true).effectiveGpuLayers, 99);
+      expect(s.copyWith(useGpu: true, gpuLayers: 20).effectiveGpuLayers, 20);
+      // JSON lama tanpa field GPU tetap CPU.
+      final legacy = AiSettings.fromJson({'mode': 'offlineOnly', 'threads': 4});
+      expect(legacy.useGpu, isFalse);
+      expect(legacy.gpuLayers, 99);
+    });
+
+    test('JSON round-trip GPU fields', () {
+      final s = AiSettings.defaults.copyWith(useGpu: true, gpuLayers: 24);
+      final json = s.toJson();
+      expect(json['use_gpu'], isTrue);
+      expect(json['gpu_layers'], 24);
+      final back = AiSettings.fromJson((jsonDecode(jsonEncode(json)) as Map).cast<String, Object?>());
+      expect(back, s);
+      expect(back.useGpu, isTrue);
+      expect(back.gpuLayers, 24);
+      expect(back, isNot(AiSettings.defaults));
+    });
+
     test('JSON round-trip', () {
       final s = AiSettings.defaults
           .copyWith(mode: AiMode.hybrid, allowInsecureLan: true, contextLength: 4096, threads: 6, maxTokens: 512)

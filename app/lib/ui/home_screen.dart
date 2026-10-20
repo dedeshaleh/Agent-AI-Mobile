@@ -7,6 +7,7 @@ import '../agents/agent_role.dart';
 import '../agents/mission_orchestrator.dart';
 import '../ai/local/local_engine.dart';
 import '../app_controller.dart';
+import '../perf/perf_monitor.dart';
 import 'agent_settings_screen.dart';
 import 'ai_settings_screen.dart';
 import 'analytics_sheet.dart';
@@ -449,9 +450,14 @@ class _PerfOverlay extends StatelessWidget {
               sep,
               item('CPU', '${p.cpuPercent.toStringAsFixed(0)}%'),
               sep,
-              item('RAM', p.rssLabel),
+              item('RAM', p.availableBytes > 0 ? '${p.rssLabel} · sisa ${p.availableLabel}' : p.rssLabel,
+                  color: p.memoryPressure ? HqColors.danger : HqColors.text),
               sep,
               item('GPU', p.gpuName.isEmpty ? '—' : '${p.gpuName.replaceAll(RegExp(r'^(ARM|Qualcomm|Adreno \(TM\)) '), '')} · ${p.unityFrameMs.toStringAsFixed(0)} ms', color: HqColors.muted),
+              if (p.thermal != ThermalLevel.unknown) ...[
+                sep,
+                item('SUHU', p.thermal.label, color: p.thermal.isHot ? HqColors.danger : (p.thermal == ThermalLevel.light ? HqColors.warning : HqColors.local)),
+              ],
               if (p.tokensPerSecond > 0) ...[
                 sep,
                 item('', '${p.tokensPerSecond.toStringAsFixed(0)} tok/s', color: HqColors.warning),

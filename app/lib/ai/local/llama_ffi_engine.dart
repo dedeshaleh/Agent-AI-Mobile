@@ -63,19 +63,31 @@ class LlamaFfiEngine implements LocalEngine {
   Map<String, Object?> get lastStats => _lastStats;
 
   @override
-  Future<void> load(String modelPath, {int contextLength = 2048, int threads = 4}) async {
+  Future<void> load(String modelPath, {int contextLength = 2048, int threads = 4, int gpuLayers = 0}) async {
     if (_active != null) throw const LocalEngineException('Tidak bisa load saat generate berjalan');
     _setState(LocalEngineState.loading);
     try {
-      final reply = await _send(_LoadCmd(modelPath, contextLength, threads, batchSize));
+      final reply = await _send(_LoadCmd(modelPath, contextLength, threads, batchSize, gpuLayers));
       _lastStats = reply.stats ?? const {};
-      _loadedModel = LocalModelInfo(path: modelPath, contextLength: contextLength, threads: threads);
+      final used = _lastStats['gpu_layers'];
+      _loadedModel = LocalModelInfo(
+        path: modelPath,
+        contextLength: contextLength,
+        threads: threads,
+        gpuLayers: used is num ? used.toInt() : (gpuLayers > 0 ? gpuLayers : 0),
+      );
       _setState(LocalEngineState.ready);
     } catch (e) {
       _loadedModel = null;
       _setState(LocalEngineState.error);
       throw _wrap(e);
     }
+  }
+
+  @override
+  Future<LocalEngineGpuInfo> gpuInfo() async {
+    final reply = await _send(_GpuInfoCmd());
+    return LocalEngineGpuInfo.fromJson(reply.stats ?? const {});
   }
 
   @override
@@ -213,7 +225,7 @@ class LlamaFfiEngine implements LocalEngine {
     _pending[cmd.id] = completer;
     port.send(cmd);
     final reply = await completer.future;
-    if (reply.error != null) throw LocalEngineException(reply.error!);
+    if (reply.error != null) throw LocalEngineException(reply.error!, code: reply.errorCode);
     return reply;
   }
 
@@ -276,14 +288,17 @@ sealed class _Cmd {
 }
 
 class _LoadCmd extends _Cmd {
-  _LoadCmd(this.path, this.nCtx, this.nThreads, this.nBatch);
+  _LoadCmd(this.path, this.nCtx, this.nThreads, this.nBatch, this.nGpuLayers);
   final String path;
   final int nCtx;
   final int nThreads;
   final int nBatch;
+  final int nGpuLayers;
 }
 
 class _UnloadCmd extends _Cmd {}
+
+class _GpuInfoCmd extends _Cmd {}
 
 class _GenerateCmd extends _Cmd {
   _GenerateCmd({
@@ -316,9 +331,12 @@ class _CancelCmd extends _Cmd {
 }
 
 class _Reply {
-  const _Reply(this.id, {this.error, this.stats});
+  const _Reply(this.id, {this.error, this.errorCode = 0, this.stats});
   final int id;
   final String? error;
+
+  /// Kode `agenthq_error` bila [error] berasal dari [LlamaNativeException].
+  final int errorCode;
   final Map<String, Object?>? stats;
 }
 
@@ -355,14 +373,16 @@ class _Worker {
     switch (msg) {
       case _LoadCmd c:
         _reply(c.id, () {
-          api.load(c.path, nCtx: c.nCtx, nThreads: c.nThreads, nBatch: c.nBatch);
-          return api.stats();
+          api.load(c.path, nCtx: c.nCtx, nThreads: c.nThreads, nBatch: c.nBatch, nGpuLayers: c.nGpuLayers);
+          return {...api.stats(), 'gpu_layers': api.gpuLayers};
         });
       case _UnloadCmd c:
         _reply(c.id, () {
           api.unload();
           return null;
         });
+      case _GpuInfoCmd c:
+        _reply(c.id, api.gpuInfo);
       case _CancelCmd c:
         if (_generating == c.generationId) {
           _cancelRequested = true;
@@ -379,7 +399,7 @@ class _Worker {
     try {
       out.send(_Reply(id, stats: body()));
     } catch (e) {
-      out.send(_Reply(id, error: e.toString()));
+      out.send(_Reply(id, error: e.toString(), errorCode: e is LlamaNativeException ? e.code : 0));
     }
   }
 
@@ -403,7 +423,7 @@ class _Worker {
       await _stream(c);
       out.send(_Reply(c.id, stats: api.stats()));
     } catch (e) {
-      out.send(_Reply(c.id, error: e.toString()));
+      out.send(_Reply(c.id, error: e.toString(), errorCode: e is LlamaNativeException ? e.code : 0));
     } finally {
       _generating = null;
     }

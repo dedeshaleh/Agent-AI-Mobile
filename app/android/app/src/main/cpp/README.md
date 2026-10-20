@@ -6,6 +6,36 @@ pinned to tag **`b11727`** and fetched at configure time with CMake `FetchConten
 library, `libagenthq_llama.so`, with llama/ggml linked statically. Dart talks to it via
 `lib/ai/local/llama_bindings.dart` and `llama_ffi_engine.dart`.
 
+## Backends
+
+- **CPU** (always): ggml-cpu with the `-march` below.
+- **GPU, Vulkan** (`AGENTHQ_GPU_VULKAN=ON`, default): ggml-vulkan compiled into the same
+  `.so`; `NEEDED` gains `libvulkan.so` (the Android loader, present on every device since
+  API 24; the *driver* may be missing). Opt-in at runtime via `agenthq_load(..., n_gpu_layers)`
+  (0 = CPU, 99 = all layers). Without a usable Vulkan 1.2 device `ggml_backend_vk_reg()`
+  returns NULL and the shim answers `AGENTHQ_ERR_GPU_UNAVAILABLE` (-11) so Dart retries on
+  the CPU. `agenthq_gpu_info()` reports the first GPU/iGPU in the ggml device registry as
+  JSON (`{"available":true,"backend":"vulkan","device":"Mali-G610 MC6","vram_mb":..,"integrated":true}`)
+  without loading a model; `agenthq_gpu_layers()` returns the layers actually offloaded.
+- Vulkan build inputs (no Vulkan SDK on this PC):
+  - `vulkan.hpp` + recent `vulkan_core.h`: FetchContent `KhronosGroup/Vulkan-Headers`
+    (`AGENTHQ_VULKAN_HEADERS_TAG`); the NDK sysroot only has C headers at header version 275.
+  - `spirv/unified1/spirv.hpp`: FetchContent `KhronosGroup/SPIRV-Headers`; ggml's
+    `find_package(SPIRV-Headers CONFIG)` is satisfied by the stub in `cmake/SPIRV-Headers/`.
+  - `glslc`: `$ANDROID_NDK/shader-tools/<host>/glslc` (found via `Vulkan_GLSLC_EXECUTABLE`).
+    NDK r27's glslc rejects `GL_KHR_cooperative_matrix`, `GL_EXT_integer_dot_product`,
+    `GL_EXT_bfloat16`; those optional shader variants are skipped (irrelevant for Mali).
+  - `libvulkan.so`: the NDK sysroot copy (`Vulkan_LIBRARY`).
+  - **Host compiler** for llama.cpp's `vulkan-shaders-gen` (an `ExternalProject` built for and
+    run on the PC): `CMakeLists.txt` looks for `g++`/`clang++`/`cl` on PATH and in winget's
+    WinLibs / LLVM-MinGW / MSYS2 folders and writes `cmake/host-toolchain.cmake.in` into the
+    build dir as `GGML_VULKAN_SHADERS_GEN_TOOLCHAIN` (MinGW is linked `-static`). On this PC:
+    `winget install --id BrechtSanders.WinLibs.POSIX.UCRT -e --scope user` (GCC 16.2, no admin;
+    VS 2026 is installed without the C++ workload). With no host compiler the configure prints
+    a warning and builds CPU-only.
+  - `cmake/agenthq_vk_compat.h` is force-included into ggml-vulkan: `std::aligned_alloc`
+    needs API 28 on Bionic while the app targets android-26.
+
 ## Build flags
 
 - Target: `arm64-v8a` only, `-march=armv8.2-a+dotprod+fp16` via `GGML_CPU_ARM_ARCH`
@@ -39,7 +69,17 @@ $out = "$env:TEMP\agenthq-native\build-arm64"                                  #
 To reuse an existing checkout instead of cloning, add
 `-DFETCHCONTENT_SOURCE_DIR_LLAMA_CPP=<path to llama.cpp at b11727>`.
 The clone uses `core.longpaths=true`; deep build directories can still hit Windows
-`MAX_PATH`, so keep `$out` short.
+`MAX_PATH`, so keep `$out` short. Add `-DAGENTHQ_GPU_VULKAN=OFF` for a CPU-only build.
+Measured with b11727 (`llvm-strip --strip-unneeded`, which is what Gradle does when packaging):
+CPU-only 4.0 MB, CPU+Vulkan 23.1 MB (18.4 MB is `.rodata`: the embedded SPIR-V shader
+variants). Unstripped build outputs are 51 MB / 83 MB because the NDK toolchain adds `-g`.
+`NEEDED` with Vulkan: `liblog.so libm.so libdl.so libvulkan.so libc++_shared.so libc.so`;
+CPU-only lacks `libvulkan.so`. Exported symbols are only `agenthq_*`; the Vulkan imports are
+1.0-level (`vkGetInstanceProcAddr`, `vkGetDeviceProcAddr`, `vkCmdCopyBuffer`,
+`vkGetPhysicalDeviceFeatures`), so the API-26 loader stub satisfies them.
+`vkGetPhysicalDeviceFeatures2` (Vulkan 1.1, exported by `libvulkan.so` only from API 28) is
+called directly by ggml-vulkan; `agenthq_llama.cpp` defines a hidden forwarder that resolves
+it with `dlsym` at runtime so the `.so` still loads on API 26/27.
 
 ## In the Flutter build
 

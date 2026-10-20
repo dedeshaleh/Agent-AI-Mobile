@@ -27,15 +27,22 @@ class FakeLocalEngine implements LocalEngine {
   @override
   Stream<LocalEngineState> get stateChanges => _changes.stream;
 
-  @override
-  LocalModelInfo? get loadedModel =>
-      _state == LocalEngineState.unloaded ? null : const LocalModelInfo(path: '/m.gguf', contextLength: 2048, threads: 4);
+  int lastGpuLayers = 0;
 
   @override
-  Future<void> load(String modelPath, {int contextLength = 2048, int threads = 4}) async {
+  LocalModelInfo? get loadedModel => _state == LocalEngineState.unloaded
+      ? null
+      : LocalModelInfo(path: '/m.gguf', contextLength: 2048, threads: 4, gpuLayers: lastGpuLayers);
+
+  @override
+  Future<void> load(String modelPath, {int contextLength = 2048, int threads = 4, int gpuLayers = 0}) async {
     loaded = true;
+    lastGpuLayers = gpuLayers;
     state = LocalEngineState.ready;
   }
+
+  @override
+  Future<LocalEngineGpuInfo> gpuInfo() async => LocalEngineGpuInfo.none;
 
   @override
   Future<void> unload() async => state = LocalEngineState.unloaded;

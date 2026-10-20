@@ -48,12 +48,81 @@ void main() {
       expect(engine.loadedModel, isNull);
     });
 
+    test('default load is CPU only (gpuLayers 0)', () async {
+      await engine.load('/models/qwen.gguf');
+      expect(engine.lastStats['requested_gpu_layers'], 0);
+      expect(engine.lastStats['gpu_layers'], 0);
+      expect(engine.loadedModel?.gpuLayers, 0);
+      expect(engine.loadedModel?.usesGpu, isFalse);
+    });
+
+    test('gpuLayers is passed to the native API and the used count is reported', () async {
+      await engine.load('/models/qwen.gguf', gpuLayers: 12);
+      expect(engine.lastStats['requested_gpu_layers'], 12);
+      expect(engine.lastStats['gpu_layers'], 12);
+      expect(engine.loadedModel?.gpuLayers, 12);
+      expect(engine.loadedModel?.usesGpu, isTrue);
+
+      // 99 = all layers -> clamped to n_layer + 1 like llama.cpp does.
+      await engine.load('/models/qwen.gguf', gpuLayers: 99);
+      expect(engine.lastStats['requested_gpu_layers'], 99);
+      expect(engine.loadedModel?.gpuLayers, fakeModelLayers + 1);
+    });
+
+    test('GPU unavailable -> LocalEngineException with isGpuUnavailable; CPU retry works', () async {
+      await expectLater(
+        engine.load(gpuUnavailableModelPath, gpuLayers: 99),
+        throwsA(isA<LocalEngineException>()
+            .having((e) => e.isGpuUnavailable, 'isGpuUnavailable', isTrue)
+            .having((e) => e.code, 'code', LocalEngineException.gpuUnavailableCode)
+            .having((e) => e.message, 'message', contains('Vulkan'))),
+      );
+      expect(engine.state, LocalEngineState.error);
+
+      await engine.load(gpuUnavailableModelPath, gpuLayers: 0);
+      expect(engine.state, LocalEngineState.ready);
+      expect(engine.loadedModel?.gpuLayers, 0);
+    });
+
+    test('other native errors are not flagged as GPU unavailable', () async {
+      await expectLater(
+        engine.load(failingModelPath, gpuLayers: 99),
+        throwsA(isA<LocalEngineException>().having((e) => e.isGpuUnavailable, 'isGpuUnavailable', isFalse)),
+      );
+    });
+
     test('unload returns to unloaded and generate is then rejected', () async {
       await engine.load('/models/qwen.gguf');
       await engine.unload();
       expect(engine.state, LocalEngineState.unloaded);
       expect(engine.loadedModel, isNull);
       expect(() => engine.generate('x', const LocalGenerateOptions()), throwsA(isA<LocalEngineException>()));
+    });
+  });
+
+  group('gpuInfo', () {
+    test('works through the isolate before any model is loaded', () async {
+      final info = await engine.gpuInfo();
+      expect(info.available, isTrue);
+      expect(info.backend, 'vulkan');
+      expect(info.device, 'Fake GPU "G1"');
+      expect(info.vramMb, 4096);
+      expect(info.integrated, isTrue);
+      expect(info.label, 'Terdeteksi: Fake GPU "G1", VRAM bersama');
+      expect(engine.state, LocalEngineState.unloaded);
+
+      await engine.load('/models/qwen.gguf');
+      expect(engine.lastStats['gpu_info_calls'], 1);
+    });
+
+    test('LocalEngineGpuInfo JSON round-trip and labels', () {
+      const none = LocalEngineGpuInfo.none;
+      expect(none.available, isFalse);
+      expect(none.label, 'Tidak ada GPU Vulkan');
+      final discrete = LocalEngineGpuInfo.fromJson({'available': true, 'device': 'Adreno 740', 'vram_mb': 2048});
+      expect(discrete.label, 'Terdeteksi: Adreno 740, VRAM 2048 MB');
+      expect(LocalEngineGpuInfo.fromJson(discrete.toJson()).toJson(), discrete.toJson());
+      expect(LocalEngineGpuInfo.fromJson(const {}).available, isFalse);
     });
   });
 

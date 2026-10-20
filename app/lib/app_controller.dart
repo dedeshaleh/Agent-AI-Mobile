@@ -12,6 +12,7 @@ import 'package:sqflite/sqflite.dart' show databaseFactory;
 import 'agents/agent_profile.dart';
 import 'agents/agent_role.dart';
 import 'agents/mission_orchestrator.dart';
+import 'perf/device_info.dart';
 import 'perf/perf_monitor.dart';
 import 'ai/ai_provider.dart';
 import 'ai/ai_router.dart';
@@ -42,6 +43,7 @@ class AppController extends ChangeNotifier {
   late final MissionOrchestrator mission;
   late final AgentProfileStore profiles;
   late final PerfMonitor perf;
+  final DeviceCpuInfo cpu = DeviceCpuInfo.detect();
 
   /// Overlay FPS/CPU/RAM di atas game; diingat antar sesi.
   bool get showPerf => _prefs.getBool('ui.show_perf') ?? true;
@@ -101,6 +103,10 @@ class AppController extends ChangeNotifier {
       game = createGameBridge();
       profiles = AgentProfileStore(_prefs);
       perf = PerfMonitor();
+      // Thread di atas jumlah core besar memperlambat llama.cpp (big.LITTLE).
+      if (settings.threads > cpu.recommendedThreads) {
+        await settingsStore.update((s) => s.copyWith(threads: cpu.recommendedThreads));
+      }
       mission = MissionOrchestrator(game: game, ai: router, profiles: profiles, perf: perf, onPersist: _persistMission);
       profiles.addListener(notifyListeners);
       mission.addListener(notifyListeners);
@@ -129,12 +135,36 @@ class AppController extends ChangeNotifier {
 
   // ---------------------------------------------------------------- model
 
+  /// Peringatan bila RAM sistem yang tersedia tidak cukup untuk model aktif
+  /// (bobot mmap + ±1 GB KV/buffer). Null = aman atau tidak bisa diukur.
+  String? memoryWarningForActiveModel() {
+    final path = models.activeModelPath;
+    if (path == null) return null;
+    final file = File(path);
+    if (!file.existsSync()) return null;
+    final mem = SystemMemory.read();
+    if (mem == null || mem.fitsModel(file.lengthSync())) return null;
+    final modelGb = (file.lengthSync() / (1 << 30)).toStringAsFixed(1);
+    return 'RAM tersedia hanya ${mem.availableLabel}, model butuh ±$modelGb GB + 1 GB. '
+        'Model akan di-swap ke storage dan jawaban jadi sangat lambat. Tutup aplikasi lain atau pakai model lebih kecil (Qwen3 1.7B).';
+  }
+
   Future<String?> loadActiveModel() async {
     final path = models.activeModelPath;
     if (path == null || !File(path).existsSync()) return 'Belum ada model aktif. Buka menu Model.';
+    final gpuLayers = settings.effectiveGpuLayers;
     try {
-      await engine.load(path, contextLength: settings.contextLength, threads: settings.threads);
-      return null;
+      try {
+        await engine.load(path, contextLength: settings.contextLength, threads: settings.threads, gpuLayers: gpuLayers);
+        return null;
+      } on LocalEngineException catch (e) {
+        if (gpuLayers <= 0 || !e.isGpuUnavailable) rethrow;
+        // GPU diminta tetapi tidak ada perangkat Vulkan yang bisa dipakai:
+        // muat ulang di CPU dan beri tahu pengguna (setelan GPU tetap tersimpan).
+        debugPrint('loadActiveModel: ${e.message}; fallback ke CPU');
+        await engine.load(path, contextLength: settings.contextLength, threads: settings.threads, gpuLayers: 0);
+        return 'GPU tidak tersedia, memakai CPU';
+      }
     } on LocalEngineException catch (e) {
       return e.message;
     } catch (e) {

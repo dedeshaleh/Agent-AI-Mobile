@@ -23,13 +23,33 @@ enum agenthq_error {
     AGENTHQ_ERR_GRAMMAR        = -8,
     AGENTHQ_ERR_NOT_GENERATING = -9,
     AGENTHQ_ERR_BUFFER_SMALL   = -10,
+    // n_gpu_layers > 0 was requested but no usable Vulkan device exists (no
+    // driver, Vulkan < 1.2, backend not compiled in) or the GPU load/context
+    // creation failed. Caller should retry with n_gpu_layers = 0.
+    AGENTHQ_ERR_GPU_UNAVAILABLE = -11,
 };
 
-// Loads a GGUF model and creates a context. n_batch <= 0 -> 512. Returns 0 or
-// a negative agenthq_error; details in agenthq_last_error().
-AGENTHQ_API int agenthq_load(const char* model_path, int n_ctx, int n_threads, int n_batch);
+// Loads a GGUF model and creates a context. n_batch <= 0 -> 512.
+// n_gpu_layers: 0 = CPU only (default/safe), N = offload N layers to the GPU
+// (Vulkan), >= 99 or negative = all layers. Returns 0 or a negative
+// agenthq_error; details in agenthq_last_error().
+AGENTHQ_API int agenthq_load(const char* model_path, int n_ctx, int n_threads, int n_batch,
+                             int n_gpu_layers);
 AGENTHQ_API void agenthq_unload(void);
 AGENTHQ_API int agenthq_is_loaded(void);
+
+// Number of layers actually offloaded to the GPU by the current model
+// (0 when CPU only or nothing loaded).
+AGENTHQ_API int agenthq_gpu_layers(void);
+
+// Queries the ggml backend device registry (no model needed) and writes JSON:
+//   {"available":true,"backend":"vulkan","device":"Mali-G610 MC6",
+//    "vram_mb":7812,"integrated":true}
+// or {"available":false,"backend":"vulkan","device":"","vram_mb":0,"integrated":false}.
+// Returns bytes written (excluding NUL) or AGENTHQ_ERR_BUFFER_SMALL. Safe to
+// call on devices without a Vulkan driver (the backend simply registers no
+// device).
+AGENTHQ_API int agenthq_gpu_info(char* out, int cap);
 
 // Clears memory, decodes the prompt (special tokens parsed) and prepares the
 // sampler chain. Fails with AGENTHQ_ERR_PROMPT_TOO_LONG if

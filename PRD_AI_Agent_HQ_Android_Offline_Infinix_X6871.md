@@ -130,7 +130,7 @@ Flutter memegang UI aplikasi, chat advisor, pengaturan AI, manajer model, file p
 - **Engine:** llama.cpp di-build sebagai shared library `arm64-v8a` dan dibundel di APK; dipanggil via `dart:ffi` (boleh memakai paket binding yang ada setelah dievaluasi lisensi dan versinya, atau binding tipis buatan sendiri). Alternatif yang boleh dibandingkan di spike: MediaPipe / LiteRT LLM Inference (format model berbeda).
 - **Isolate terpisah:** load model, prompt processing, dan generate tidak pernah di UI isolate. Token di-stream ke UI lewat `Stream` dan di-batch (mis. tiap 50–100 ms), bukan per frame.
 - **Satu model, satu inferensi aktif:** model dimuat sekali dan dipakai bergantian oleh semua agent lokal via antrean prioritas (§7). Mendukung cancel, timeout, dan unload saat memori tertekan (`onTrimMemory`).
-- **Parameter awal:** context 2048 (naik ke 4096 setelah benchmark), output 256–512 token, 4 thread, CPU-only. GPU/NPU hanya setelah profiling.
+- **Parameter awal:** context 2048 (naik ke 4096 setelah benchmark), output 256–512 token, 4 thread. Backend default CPU; GPU (Vulkan) tersedia sebagai opsi per perangkat yang dipilih pengguna di Pengaturan AI (jumlah layer yang di-offload dapat diatur), dengan benchmark di perangkat sebagai dasar keputusan. Bila driver Vulkan tidak ada, model otomatis dimuat di CPU dan pengguna diberi tahu; NPU belum dipakai.
 - **Structured output:** gunakan grammar/JSON schema llama.cpp untuk output agent agar valid secara struktur.
 - **Model tidak dibundel di APK.** Manajer model di aplikasi:
   - Unduh dari daftar URL yang dikurasi (mis. Hugging Face) dengan resume, verifikasi SHA-256, dan cek sisa storage sebelum unduh.

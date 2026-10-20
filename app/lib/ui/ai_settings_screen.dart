@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 
 import '../agents/agent_role.dart';
 import '../ai/ai_provider.dart';
+import '../ai/ai_settings.dart';
 import '../ai/api_key_store.dart';
+import '../ai/local/local_engine.dart';
 import '../ai/providers/anthropic_provider.dart';
 import '../ai/providers/gemini_provider.dart';
 import '../app_controller.dart';
@@ -144,9 +146,36 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
               const SizedBox(height: 18),
               const _Section('PARAMETER MODEL LOKAL'),
               _Slider('Context (token)', s.contextLength.toDouble(), 1024, 8192, 1024, (v) => c.settingsStore.update((cur) => cur.copyWith(contextLength: v.round()))),
-              _Slider('Thread CPU', s.threads.toDouble(), 2, 8, 1, (v) => c.settingsStore.update((cur) => cur.copyWith(threads: v.round()))),
+              _Slider('Thread CPU', s.threads.toDouble().clamp(2, c.cpu.recommendedThreads.toDouble()), 2, c.cpu.recommendedThreads.toDouble(), (c.cpu.recommendedThreads - 2).clamp(1, 6).toDouble(),
+                  (v) => c.settingsStore.update((cur) => cur.copyWith(threads: v.round()))),
+              Text(
+                'Perangkat ini punya ${c.cpu.totalCores} core (${c.cpu.bigCores} core besar). llama.cpp menunggu thread paling lambat, jadi thread dibatasi ke core besar; lebih banyak thread justru memperlambat.',
+                style: const TextStyle(fontSize: 11, color: HqColors.muted),
+              ),
               _Slider('Output maks (token)', s.maxTokens.toDouble(), 128, 1024, 64, (v) => c.settingsStore.update((cur) => cur.copyWith(maxTokens: v.round()))),
-              const Text('Perubahan context/thread berlaku saat model dimuat ulang.', style: TextStyle(fontSize: 11, color: HqColors.muted)),
+              const SizedBox(height: 8),
+              const Text('Backend inferensi', style: TextStyle(fontSize: 13)),
+              const SizedBox(height: 4),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('CPU'), icon: Icon(Icons.memory, size: 16)),
+                  ButtonSegment(value: true, label: Text('GPU (Vulkan, eksperimental)'), icon: Icon(Icons.videogame_asset_outlined, size: 16)),
+                ],
+                selected: {s.useGpu},
+                onSelectionChanged: (v) => c.settingsStore.update((cur) => cur.copyWith(useGpu: v.first)),
+              ),
+              if (s.useGpu) ...[
+                const SizedBox(height: 6),
+                _Slider('Layer di GPU', s.gpuLayers.toDouble().clamp(1, 99), 1, 99, 1, (v) => c.settingsStore.update((cur) => cur.copyWith(gpuLayers: v.round()))),
+                Text(
+                  s.gpuLayers >= AiSettings.allGpuLayers
+                      ? '99 = semua layer ke GPU. Kurangi bila memori GPU tidak cukup atau game view tersendat.'
+                      : '${s.gpuLayers} layer ke GPU, sisanya CPU. 99 = semua layer.',
+                  style: const TextStyle(fontSize: 11, color: HqColors.muted),
+                ),
+              ],
+              _GpuInfoLine(engine: c.engine),
+              const Text('Perubahan context/thread/backend berlaku saat model dimuat ulang. Bila GPU tidak tersedia, model otomatis dimuat di CPU.', style: TextStyle(fontSize: 11, color: HqColors.muted)),
               const SizedBox(height: 18),
               const _Section('KEAMANAN'),
               SwitchListTile(
@@ -426,5 +455,38 @@ class _Section extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.only(bottom: 8),
         child: Text(text, style: const TextStyle(fontSize: 10.5, color: HqColors.muted, letterSpacing: 1.2, fontWeight: FontWeight.w700)),
+      );
+}
+
+/// Satu baris "Terdeteksi: Mali-G610 MC6, VRAM bersama" / "Tidak ada GPU
+/// Vulkan". Ditanya sekali ke engine (lewat isolate pekerja), bukan tiap build.
+class _GpuInfoLine extends StatefulWidget {
+  const _GpuInfoLine({required this.engine});
+  final LocalEngine engine;
+
+  @override
+  State<_GpuInfoLine> createState() => _GpuInfoLineState();
+}
+
+class _GpuInfoLineState extends State<_GpuInfoLine> {
+  late final Future<LocalEngineGpuInfo> _info = widget.engine.gpuInfo().catchError((_) => LocalEngineGpuInfo.none);
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<LocalEngineGpuInfo>(
+        future: _info,
+        builder: (context, snap) {
+          final info = snap.data;
+          final text = info == null ? 'Mendeteksi GPU Vulkan…' : info.label;
+          return Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 2),
+            child: Row(
+              children: [
+                Icon(info?.available ?? false ? Icons.check_circle_outline : Icons.info_outline, size: 14, color: HqColors.muted),
+                const SizedBox(width: 6),
+                Expanded(child: Text(text, style: const TextStyle(fontSize: 11, color: HqColors.muted))),
+              ],
+            ),
+          );
+        },
       );
 }
